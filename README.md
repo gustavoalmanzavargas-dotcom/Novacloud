@@ -6,10 +6,18 @@ Cyverax Nova is a self-hosted cloud-console application. A fresh installation st
 
 Use a clean Debian 12 or Debian 13 LXC with at least 2 CPU cores, 4 GB RAM, 20 GB storage, systemd, working DNS, and Internet access.
 
-Because this repository is private, authenticate the LXC to GitHub with an SSH deploy key first. Then run:
+```bash
+curl -fsSL https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novacloud/main/bootstrap.sh | sudo bash
+```
+
+The bootstrap command downloads the current public release and launches the interactive installer. Run it directly from the LXC console or an SSH session.
+
+### Manual installation
 
 ```bash
-git clone git@github.com:gustavoalmanzavargas-dotcom/Novacloud.git && cd Novacloud && sudo bash install.sh
+apt update && apt install -y git && \
+git clone https://github.com/gustavoalmanzavargas-dotcom/Novacloud.git && \
+cd Novacloud && sudo bash install.sh
 ```
 
 The installer asks for the web hostname, administrator account, optional Gemini key, and optional HTTPS. It automatically installs Node.js, PostgreSQL, Nginx, the database schema, the Nova service, and Let's Encrypt when selected.
@@ -17,7 +25,7 @@ The installer asks for the web hostname, administrator account, optional Gemini 
 ## Update an installed instance
 
 ```bash
-cd /path/to/Novacloud
+cd /opt/novacloud
 sudo git pull
 sudo npm install
 sudo npm run db:migrate

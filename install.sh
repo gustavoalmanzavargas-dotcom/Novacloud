@@ -17,7 +17,8 @@ if [[ "${ID}" != "debian" || "${VERSION_ID%%.*}" -lt 12 ]]; then
   exit 1
 fi
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="/opt/novacloud"
 DB_NAME="novacloud"
 DB_USER="novacloud"
 DB_PASSWORD=""
@@ -26,6 +27,10 @@ SESSION_SECRET=""
 echo "Cyverax Nova LXC installer"
 read -rp "Web hostname or IP address: " APP_HOST
 APP_HOST="${APP_HOST:-_}"
+if [[ "${APP_HOST}" == */* ]]; then
+  echo "Using host ${APP_HOST%%/*}; CIDR suffixes are not used in web addresses."
+  APP_HOST="${APP_HOST%%/*}"
+fi
 read -rp "Administrator name [Nova Administrator]: " ADMIN_NAME
 ADMIN_NAME="${ADMIN_NAME:-Nova Administrator}"
 read -rp "Administrator email: " ADMIN_EMAIL
@@ -48,9 +53,14 @@ read -rp "Optional Gemini API key (press Enter to skip): " GEMINI_API_KEY
 
 echo "Installing system packages..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg nginx openssl postgresql postgresql-contrib
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg nginx openssl postgresql postgresql-contrib rsync
 DB_PASSWORD="$(openssl rand -hex 24)"
 SESSION_SECRET="$(openssl rand -hex 48)"
+
+mkdir -p "${APP_DIR}"
+if [[ "${SOURCE_DIR}" != "${APP_DIR}" ]]; then
+  rsync -a --exclude='.env' --exclude='node_modules/' --exclude='dist/' "${SOURCE_DIR}/" "${APP_DIR}/"
+fi
 
 NODE_MAJOR="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true)"
 if [[ -z "${NODE_MAJOR}" || "${NODE_MAJOR}" -lt 20 ]]; then
@@ -70,7 +80,6 @@ SQL
 APP_URL="http://${APP_HOST}"
 COOKIE_SECURE="false"
 cat > "${APP_DIR}/.env" <<EOF
-NODE_ENV=production
 PORT=3000
 APP_URL=${APP_URL}
 COOKIE_SECURE=${COOKIE_SECURE}
@@ -104,6 +113,7 @@ User=novacloud
 Group=novacloud
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node ${APP_DIR}/dist/server.cjs
 Restart=on-failure
 RestartSec=5
@@ -139,7 +149,8 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 
 systemctl daemon-reload
-systemctl enable --now novacloud
+systemctl enable novacloud
+systemctl restart novacloud
 systemctl reload nginx
 
 if [[ "${APP_HOST}" != "_" && ! "${APP_HOST}" =~ ^[0-9.]+$ ]]; then
@@ -159,7 +170,20 @@ if [[ "${APP_HOST}" != "_" && ! "${APP_HOST}" =~ ^[0-9.]+$ ]]; then
   fi
 fi
 
-curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null
+HEALTHY="false"
+for _ in {1..30}; do
+  if curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null; then
+    HEALTHY="true"
+    break
+  fi
+  sleep 1
+done
+if [[ "${HEALTHY}" != "true" ]]; then
+  echo "Nova did not become healthy within 30 seconds."
+  systemctl status novacloud --no-pager --full || true
+  journalctl -u novacloud -n 50 --no-pager || true
+  exit 1
+fi
 echo
 echo "Cyverax Nova installation completed."
 echo "Open: ${APP_URL}"
