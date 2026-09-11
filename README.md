@@ -7,6 +7,14 @@ Cyverax Nova is a self-hosted cloud-console application. A fresh installation st
 Use a clean Debian 12 or Debian 13 LXC with at least 2 CPU cores, 4 GB RAM, 20 GB storage, systemd, working DNS, and Internet access.
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novacloud/main/bootstrap.sh | sudo bash
+```
+
+The bootstrap command downloads the current public release and launches the interactive installer. Run it directly from the LXC console or an SSH session.
+
+### Manual installation
+
+```bash
 apt update && apt install -y git && \
 git clone https://github.com/gustavoalmanzavargas-dotcom/Novacloud.git && \
 cd Novacloud && sudo bash install.sh
