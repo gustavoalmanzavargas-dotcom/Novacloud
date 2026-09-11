@@ -149,7 +149,8 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 
 systemctl daemon-reload
-systemctl enable --now novacloud
+systemctl enable novacloud
+systemctl restart novacloud
 systemctl reload nginx
 
 if [[ "${APP_HOST}" != "_" && ! "${APP_HOST}" =~ ^[0-9.]+$ ]]; then
@@ -169,7 +170,20 @@ if [[ "${APP_HOST}" != "_" && ! "${APP_HOST}" =~ ^[0-9.]+$ ]]; then
   fi
 fi
 
-curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null
+HEALTHY="false"
+for _ in {1..30}; do
+  if curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null; then
+    HEALTHY="true"
+    break
+  fi
+  sleep 1
+done
+if [[ "${HEALTHY}" != "true" ]]; then
+  echo "Nova did not become healthy within 30 seconds."
+  systemctl status novacloud --no-pager --full || true
+  journalctl -u novacloud -n 50 --no-pager || true
+  exit 1
+fi
 echo
 echo "Cyverax Nova installation completed."
 echo "Open: ${APP_URL}"
