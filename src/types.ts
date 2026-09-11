@@ -204,6 +204,8 @@ export interface SecurityAlert {
 
 export type ActiveView =
   | 'home'
+  | 'master-cluster'
+  | 'clients'
   | 'compute'
   | 'vm-detail'
   | 'containers'
@@ -222,3 +224,107 @@ export type ActiveView =
   | 'billing'
   | 'activity'
   | 'settings';
+
+export type GpuTier =
+  | 'None'
+  | '1x NVIDIA L4 (24GB)'
+  | '1x NVIDIA A100 (80GB SXM4)'
+  | '2x NVIDIA A100 (80GB SXM4)'
+  | '1x NVIDIA H100 (80GB SXM5)'
+  | '2x NVIDIA H100 (80GB SXM5)'
+  | '4x NVIDIA H100 (80GB SXM5)';
+
+export interface ClientTenantInstance {
+  id: string;
+  name: string;
+  clientCompany: string;
+  clientEmail: string;
+  status: 'Active' | 'Provisioning' | 'Suspended' | 'Maintenance';
+  plan: 'Starter' | 'Scale' | 'Enterprise' | 'AI Elite';
+  monthlyBilling: number;
+  clusterNodeId: string;
+  // VLAN & Network Virtualization (AWS / GCP / Azure style)
+  vlanId: number;
+  vxlanVni: number;
+  vpcCidr: string;
+  isolatedSubnet: string;
+  virtualGateway: string;
+  natGatewayIp: string;
+  dnsServers: string[];
+  firewallRulesCount: number;
+  isolationStatus: 'Strictly Isolated (0 Crosstalk)';
+  // Master Allocated Resources
+  vCpuAllocated: number;
+  vCpuMaxQuota: number;
+  ramGbAllocated: number;
+  ramGbMaxQuota: number;
+  gpuAllocated: GpuTier;
+  storageGbAllocated: number;
+  bandwidthLimitMbps: number;
+  // Live Telemetry
+  cpuUsagePct: number;
+  ramUsagePct: number;
+  storageUsedGb: number;
+  activeWorkloadsCount: number;
+  networkThroughputMbps: number;
+  installedApps: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClusterPhysicalNode {
+  id: string;
+  name: string;
+  rackLocation: string;
+  status: 'Online' | 'Maintenance' | 'Degraded';
+  cpuModel: string;
+  totalCores: number;
+  allocatedCores: number;
+  totalRamGb: number;
+  allocatedRamGb: number;
+  gpuUnits: string[];
+  allocatedGpus: number;
+  storageNvmeTb: number;
+  temperatureC: number;
+  uptimeDays: number;
+}
+
+export interface MasterClusterSummary {
+  clusterName: string;
+  location: string;
+  hypervisor: string;
+  networkFabric: string;
+  status: 'Healthy' | 'Degraded';
+  totalNodes: number;
+  onlineNodes: number;
+  totalPhysicalCores: number;
+  allocatedVcpu: number;
+  totalRamGb: number;
+  allocatedRamGb: number;
+  totalGpus: number;
+  allocatedGpus: number;
+  totalStorageTb: number;
+  allocatedStorageTb: number;
+  totalClients: number;
+  activeVlansCount: number;
+  vlanRange: string;
+  sdnController: string;
+  crossTenantIsolation: '100% Enforced (Hardware EVPN/VXLAN)';
+  nodes: ClusterPhysicalNode[];
+}
+
+export interface VlanNetworkMapping {
+  vlanId: number;
+  vxlanVni: number;
+  tenantId: string;
+  tenantName: string;
+  companyName: string;
+  vpcCidr: string;
+  gateway: string;
+  natGateway: string;
+  attachedNodes: string[];
+  activeIpAddresses: string[];
+  firewallPolicy: 'Default Deny Inter-VLAN + Stateful Outbound NAT';
+  isolationCheck: 'Verified PASS';
+  lastPacketLossPct: number;
+}

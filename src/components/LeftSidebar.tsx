@@ -24,6 +24,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   Share2,
+  Server,
 } from 'lucide-react';
 import { ActiveView } from '../types';
 
@@ -174,6 +175,40 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           >
             <LayoutDashboard className="w-4 h-4 shrink-0 text-slate-400" />
             {!collapsedState && <span>Dashboard Overview</span>}
+          </button>
+        </div>
+
+        {/* Master Cluster & Multi-Tenancy Section */}
+        <div className={`my-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-800/60'}`} />
+        <div className="px-2 space-y-0.5">
+          {!collapsedState && (
+            <div
+              className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider font-mono flex items-center justify-between ${
+                isLight ? 'text-cyan-700' : 'text-cyan-400'
+              }`}
+            >
+              <span>Master Controller</span>
+              <span className="text-[9px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 rounded font-semibold border border-cyan-500/40">ROOT</span>
+            </div>
+          )}
+
+          <button
+            id="nav-client-instances-btn"
+            onClick={() => onNavigate('clients')}
+            className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${getItemClass(
+              activeView === 'clients'
+            )}`}
+            title="Client Instances & Hardware Allocation"
+          >
+            <div className="flex items-center gap-3">
+              <Server className="w-4 h-4 shrink-0 text-cyan-400" />
+              {!collapsedState && <span>Client Instances</span>}
+            </div>
+            {!collapsedState && (
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-bold">
+                VLANs
+              </span>
+            )}
           </button>
         </div>
 

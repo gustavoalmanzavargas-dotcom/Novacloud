@@ -24,6 +24,7 @@ import { LogsView } from './components/views/LogsView';
 import { BackupsView } from './components/views/BackupsView';
 import { DevToolsView } from './components/views/DevToolsView';
 import { MarketplaceView } from './components/views/MarketplaceView';
+import { ClientInstancesView } from './components/views/ClientInstancesView';
 import { SettingsView } from './components/views/SettingsView';
 import { LoginScreen } from './components/LoginScreen';
 
@@ -55,6 +56,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>('home');
   const [activeSubTab, setActiveSubTab] = useState<string | undefined>(undefined);
   const [selectedVM, setSelectedVM] = useState<VMInstance | null>(null);
+  const [marketplaceClientId, setMarketplaceClientId] = useState<string | undefined>(undefined);
 
   // App Shell States
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -310,8 +312,24 @@ export default function App() {
                 activeSubTab={activeSubTab}
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />
+            ) : activeView === 'clients' ? (
+              <ClientInstancesView
+                themeMode={themeMode}
+                onAssumeTenant={(tenant) => {
+                  setSelectedEnvironment(`${tenant.clientCompany} (VLAN ${tenant.vlanId})`);
+                  handleNavigate('home');
+                }}
+                onNavigateToMarketplace={(clientId) => {
+                  setMarketplaceClientId(clientId);
+                  handleNavigate('marketplace');
+                }}
+              />
             ) : activeView === 'marketplace' ? (
-              <MarketplaceView themeMode={themeMode} />
+              <MarketplaceView
+                themeMode={themeMode}
+                preselectedClientId={marketplaceClientId}
+                onNavigateToClients={() => handleNavigate('clients')}
+              />
             ) : activeView === 'settings' ? (
               <SettingsView
                 themeMode={themeMode}
