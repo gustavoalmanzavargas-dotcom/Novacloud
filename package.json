@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "cyverax-nova",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,6 +7,8 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "admin:create": "tsx scripts/create-admin.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
@@ -21,6 +23,10 @@
     "vite": "^6.2.3",
     "express": "^4.21.2",
     "dotenv": "^17.2.3",
+    "bcryptjs": "^3.0.2",
+    "connect-pg-simple": "^10.0.0",
+    "express-session": "^1.18.2",
+    "pg": "^8.16.3",
     "motion": "^12.23.24"
   },
   "devDependencies": {
@@ -31,6 +37,8 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
-    "@types/express": "^4.17.21"
+    "@types/express": "^4.17.21",
+    "@types/express-session": "^1.18.2",
+    "@types/pg": "^8.15.5"
   }
 }

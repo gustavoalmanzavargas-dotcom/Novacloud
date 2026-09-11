@@ -25,6 +25,7 @@ import { BackupsView } from './components/views/BackupsView';
 import { DevToolsView } from './components/views/DevToolsView';
 import { MarketplaceView } from './components/views/MarketplaceView';
 import { SettingsView } from './components/views/SettingsView';
+import { LoginScreen } from './components/LoginScreen';
 
 // Mock Data
 import {
@@ -37,9 +38,19 @@ import {
   MOCK_NOTIFICATIONS,
   MOCK_ACTIVITY_LOG,
 } from './data/mockData';
-import { ActiveView, VMInstance } from './types';
+import {
+  ActiveView,
+  ActivityEvent,
+  AIRecommendation,
+  ApplicationItem,
+  DatabaseItem,
+  SecurityAlert,
+  StorageItem,
+  VMInstance,
+} from './types';
 
 export default function App() {
+  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'anonymous'>('loading');
   // Navigation State
   const [activeView, setActiveView] = useState<ActiveView>('home');
   const [activeSubTab, setActiveSubTab] = useState<string | undefined>(undefined);
@@ -76,6 +87,39 @@ export default function App() {
   // Domain Data State
   const [vms, setVms] = useState<VMInstance[]>(MOCK_VMS);
   const [notifications, setNotifications] = useState(MOCK_NOTIFICATIONS);
+  const [applications, setApplications] = useState<ApplicationItem[]>(MOCK_APPLICATIONS);
+  const [databases, setDatabases] = useState<DatabaseItem[]>(MOCK_DATABASES);
+  const [storage, setStorage] = useState<StorageItem[]>(MOCK_STORAGE);
+  const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>(MOCK_SECURITY_ALERTS);
+  const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>(MOCK_AI_RECOMMENDATIONS);
+  const [activities, setActivities] = useState<ActivityEvent[]>(MOCK_ACTIVITY_LOG);
+
+  const loadDashboard = async () => {
+    const response = await fetch('/api/dashboard');
+    if (!response.ok) throw new Error('Unable to load dashboard');
+    const data = await response.json();
+    setVms(data.vms || []);
+    setApplications(data.applications || []);
+    setDatabases(data.databases || []);
+    setStorage(data.storage || []);
+    setNotifications(data.notifications || []);
+    setSecurityAlerts(data.securityAlerts || []);
+    setAiRecommendations(data.aiRecommendations || []);
+    setActivities(data.activities || []);
+  };
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((response) => {
+        if (!response.ok) throw new Error('anonymous');
+        return response.json();
+      })
+      .then(async () => {
+        setAuthState('authenticated');
+        await loadDashboard();
+      })
+      .catch(() => setAuthState('anonymous'));
+  }, []);
 
   // Keyboard Shortcuts (Ctrl+K, `)
   useEffect(() => {
@@ -122,6 +166,14 @@ export default function App() {
   };
 
   const unreadNotificationCount = (notifications || []).filter((n) => !n?.read).length;
+
+  if (authState === 'loading') {
+    return <div className="min-h-screen bg-slate-950 text-slate-300 flex items-center justify-center">Starting Cyverax Nova…</div>;
+  }
+
+  if (authState === 'anonymous') {
+    return <LoginScreen onAuthenticated={async () => { setAuthState('authenticated'); await loadDashboard(); }} />;
+  }
 
   return (
     <div className={`min-h-screen font-sans flex flex-col ${themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-slate-100 text-slate-900'}`}>
@@ -173,10 +225,10 @@ export default function App() {
                 onOpenCreateResource={() => setIsCreateModalOpen(true)}
                 onSelectVM={(vm) => setSelectedVM(vm)}
                 vms={vms}
-                applications={MOCK_APPLICATIONS}
-                databases={MOCK_DATABASES}
-                storage={MOCK_STORAGE}
-                activities={MOCK_ACTIVITY_LOG}
+                applications={applications}
+                databases={databases}
+                storage={storage}
+                activities={activities}
                 themeMode={themeMode}
               />
             ) : activeView === 'compute' ? (
@@ -191,7 +243,7 @@ export default function App() {
               />
             ) : activeView === 'applications' || activeView === 'containers' ? (
               <ApplicationsView
-                applications={MOCK_APPLICATIONS}
+                applications={applications}
                 themeMode={themeMode}
                 launchWizardDirectly={launchDeployDirectly}
                 onNavigateToAi={() => handleNavigate('ai')}
@@ -205,24 +257,24 @@ export default function App() {
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />
             ) : activeView === 'ai' ? (
-              <AiView recommendations={MOCK_AI_RECOMMENDATIONS} themeMode={themeMode} />
+              <AiView recommendations={aiRecommendations} themeMode={themeMode} />
             ) : activeView === 'databases' ? (
               <DatabasesView
-                databases={MOCK_DATABASES}
+                databases={databases}
                 themeMode={themeMode}
                 activeSubTab={activeSubTab}
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />
             ) : activeView === 'storage' ? (
               <StorageView
-                storage={MOCK_STORAGE}
+                storage={storage}
                 themeMode={themeMode}
                 activeSubTab={activeSubTab}
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />
             ) : activeView === 'security' ? (
               <SecurityView
-                securityAlerts={MOCK_SECURITY_ALERTS}
+                securityAlerts={securityAlerts}
                 themeMode={themeMode}
                 activeSubTab={activeSubTab}
                 onTabChange={(tab) => setActiveSubTab(tab)}
@@ -235,7 +287,7 @@ export default function App() {
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />
             ) : activeView === 'activity' ? (
-              <ActivityView activities={MOCK_ACTIVITY_LOG} themeMode={themeMode} />
+              <ActivityView activities={activities} themeMode={themeMode} />
             ) : activeView === 'iam' ? (
               <IamView
                 themeMode={themeMode}

@@ -677,7 +677,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               {!collapsedState && (
                 <div className="flex items-center gap-1.5">
                   <span className="text-[9px] px-1.5 py-0.2 font-mono font-bold bg-red-500/15 text-red-600 rounded border border-red-500/25">
-                    92
+                    —
                   </span>
                   {securityOpen ? (
                     <ChevronDown className="w-3 h-3 text-slate-400" />
@@ -701,7 +701,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'security' && (!activeSubTab || activeSubTab === 'overview')
                   )}`}
                 >
-                  Security Posture (Score 92)
+                  Security Posture (Not scanned)
                 </button>
                 <button
                   id="nav-sub-sec-vulns-btn"
@@ -1004,7 +1004,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
             </div>
             {!collapsedState && (
               <span className={`text-[10px] font-mono font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                $1,842
+                —
               </span>
             )}
           </button>
