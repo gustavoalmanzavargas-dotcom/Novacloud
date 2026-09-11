@@ -1,0 +1,6 @@
+{
+  "name": "Cyverax Nova Cloud Console",
+  "description": "Enterprise cloud management platform for Cyverax Nova infrastructure, compute, networking, security, AI automation, and applications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
