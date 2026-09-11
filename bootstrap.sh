@@ -30,7 +30,9 @@ trap cleanup EXIT
 
 git clone --depth 1 "${REPOSITORY_URL}" "${BOOTSTRAP_DIR}/Novacloud"
 
-if [[ -r /dev/tty ]]; then
+if [[ "${NOVA_UNATTENDED:-}" == "1" ]]; then
+  bash "${BOOTSTRAP_DIR}/Novacloud/install.sh"
+elif [[ -r /dev/tty ]]; then
   bash "${BOOTSTRAP_DIR}/Novacloud/install.sh" </dev/tty
 else
   echo "An interactive terminal is required to create the administrator account."
