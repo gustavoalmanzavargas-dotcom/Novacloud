@@ -27,6 +27,10 @@ SESSION_SECRET=""
 echo "Cyverax Nova LXC installer"
 read -rp "Web hostname or IP address: " APP_HOST
 APP_HOST="${APP_HOST:-_}"
+if [[ "${APP_HOST}" == */* ]]; then
+  echo "Using host ${APP_HOST%%/*}; CIDR suffixes are not used in web addresses."
+  APP_HOST="${APP_HOST%%/*}"
+fi
 read -rp "Administrator name [Nova Administrator]: " ADMIN_NAME
 ADMIN_NAME="${ADMIN_NAME:-Nova Administrator}"
 read -rp "Administrator email: " ADMIN_EMAIL
@@ -55,7 +59,7 @@ SESSION_SECRET="$(openssl rand -hex 48)"
 
 mkdir -p "${APP_DIR}"
 if [[ "${SOURCE_DIR}" != "${APP_DIR}" ]]; then
-  rsync -a +    --exclude='.env' +    --exclude='node_modules/' +    --exclude='dist/' +    "${SOURCE_DIR}/" "${APP_DIR}/"
+  rsync -a --exclude='.env' --exclude='node_modules/' --exclude='dist/' "${SOURCE_DIR}/" "${APP_DIR}/"
 fi
 
 NODE_MAJOR="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true)"
