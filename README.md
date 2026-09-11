@@ -12,6 +12,16 @@ curl -fsSL https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novaclo
 
 The bootstrap command downloads the current public release and launches the interactive installer. Run it directly from the LXC console or an SSH session.
 
+## Create the LXC from a Proxmox node
+
+Run this command as root on a Proxmox VE node:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novacloud/main/proxmox/create-lxc.sh)"
+```
+
+The helper creates an unprivileged Debian 13 LXC and asks for its VMID, storage, bridge, VLAN, DHCP or static network configuration, resources, and Nova administrator account. It then installs and starts Nova inside the container.
+
 ### Manual installation
 
 ```bash

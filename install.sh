@@ -25,31 +25,49 @@ DB_PASSWORD=""
 SESSION_SECRET=""
 
 echo "Cyverax Nova LXC installer"
-read -rp "Web hostname or IP address: " APP_HOST
+APP_HOST="${NOVA_APP_HOST:-}"
+if [[ -z "${APP_HOST}" ]]; then
+  read -rp "Web hostname or IP address: " APP_HOST
+fi
 APP_HOST="${APP_HOST:-_}"
 if [[ "${APP_HOST}" == */* ]]; then
   echo "Using host ${APP_HOST%%/*}; CIDR suffixes are not used in web addresses."
   APP_HOST="${APP_HOST%%/*}"
 fi
-read -rp "Administrator name [Nova Administrator]: " ADMIN_NAME
+ADMIN_NAME="${NOVA_ADMIN_NAME:-}"
+if [[ -z "${ADMIN_NAME}" ]]; then
+  read -rp "Administrator name [Nova Administrator]: " ADMIN_NAME
+fi
 ADMIN_NAME="${ADMIN_NAME:-Nova Administrator}"
-read -rp "Administrator email: " ADMIN_EMAIL
+ADMIN_EMAIL="${NOVA_ADMIN_EMAIL:-}"
+if [[ -z "${ADMIN_EMAIL}" ]]; then
+  read -rp "Administrator email: " ADMIN_EMAIL
+fi
 while [[ ! "${ADMIN_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; do
   read -rp "Enter a valid administrator email: " ADMIN_EMAIL
 done
-while true; do
-  read -rsp "Administrator password (minimum 12 characters): " ADMIN_PASSWORD
+ADMIN_PASSWORD="${NOVA_ADMIN_PASSWORD:-}"
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+  while true; do
+    read -rsp "Administrator password (minimum 12 characters): " ADMIN_PASSWORD
+    echo
+    if [[ ${#ADMIN_PASSWORD} -ge 12 ]]; then break; fi
+    echo "Password must contain at least 12 characters."
+  done
+  read -rsp "Confirm administrator password: " ADMIN_PASSWORD_CONFIRM
   echo
-  if [[ ${#ADMIN_PASSWORD} -ge 12 ]]; then break; fi
-  echo "Password must contain at least 12 characters."
-done
-read -rsp "Confirm administrator password: " ADMIN_PASSWORD_CONFIRM
-echo
-if [[ "${ADMIN_PASSWORD}" != "${ADMIN_PASSWORD_CONFIRM}" ]]; then
-  echo "Passwords do not match."
+  if [[ "${ADMIN_PASSWORD}" != "${ADMIN_PASSWORD_CONFIRM}" ]]; then
+    echo "Passwords do not match."
+    exit 1
+  fi
+elif [[ ${#ADMIN_PASSWORD} -lt 12 ]]; then
+  echo "NOVA_ADMIN_PASSWORD must contain at least 12 characters."
   exit 1
 fi
-read -rp "Optional Gemini API key (press Enter to skip): " GEMINI_API_KEY
+GEMINI_API_KEY="${NOVA_GEMINI_API_KEY:-}"
+if [[ -z "${NOVA_UNATTENDED:-}" ]]; then
+  read -rp "Optional Gemini API key (press Enter to skip): " GEMINI_API_KEY
+fi
 
 echo "Installing system packages..."
 apt-get update
@@ -154,10 +172,16 @@ systemctl restart novacloud
 systemctl reload nginx
 
 if [[ "${APP_HOST}" != "_" && ! "${APP_HOST}" =~ ^[0-9.]+$ ]]; then
-  read -rp "Configure free Let's Encrypt HTTPS now? [Y/n]: " ENABLE_TLS
+  ENABLE_TLS="${NOVA_ENABLE_TLS:-}"
+  if [[ -z "${ENABLE_TLS}" ]]; then
+    read -rp "Configure free Let's Encrypt HTTPS now? [Y/n]: " ENABLE_TLS
+  fi
   ENABLE_TLS="${ENABLE_TLS:-Y}"
   if [[ "${ENABLE_TLS}" =~ ^[Yy]$ ]]; then
-    read -rp "Email for certificate notices: " TLS_EMAIL
+    TLS_EMAIL="${NOVA_TLS_EMAIL:-}"
+    if [[ -z "${TLS_EMAIL}" ]]; then
+      read -rp "Email for certificate notices: " TLS_EMAIL
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y certbot python3-certbot-nginx
     if certbot --nginx --non-interactive --agree-tos --redirect -m "${TLS_EMAIL}" -d "${APP_HOST}"; then
       sed -i 's/^APP_URL=.*/APP_URL=https:\/\/'"${APP_HOST}"'/' "${APP_DIR}/.env"
