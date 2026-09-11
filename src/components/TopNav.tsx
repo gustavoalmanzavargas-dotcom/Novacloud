@@ -492,7 +492,7 @@ export const TopNav: React.FC<TopNavProps> = ({
               GA
             </div>
             <span className="hidden xl:inline max-w-[120px] truncate text-[11px] font-medium">
-              gustavo.vargas
+              Nova Administrator
             </span>
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
@@ -509,7 +509,7 @@ export const TopNav: React.FC<TopNavProps> = ({
                   Gustavo Almanza Vargas
                 </div>
                 <div className={`text-[11px] font-mono truncate ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                  gustavoalmanzavargas@gmail.com
+                  Signed-in administrator
                 </div>
                 <div className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-600 font-medium text-[10px]">
                   <Shield className="w-3 h-3" /> Organization Admin
