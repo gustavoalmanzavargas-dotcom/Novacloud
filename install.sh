@@ -17,7 +17,8 @@ if [[ "${ID}" != "debian" || "${VERSION_ID%%.*}" -lt 12 ]]; then
   exit 1
 fi
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="/opt/novacloud"
 DB_NAME="novacloud"
 DB_USER="novacloud"
 DB_PASSWORD=""
@@ -48,9 +49,14 @@ read -rp "Optional Gemini API key (press Enter to skip): " GEMINI_API_KEY
 
 echo "Installing system packages..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg nginx openssl postgresql postgresql-contrib
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg nginx openssl postgresql postgresql-contrib rsync
 DB_PASSWORD="$(openssl rand -hex 24)"
 SESSION_SECRET="$(openssl rand -hex 48)"
+
+mkdir -p "${APP_DIR}"
+if [[ "${SOURCE_DIR}" != "${APP_DIR}" ]]; then
+  rsync -a +    --exclude='.env' +    --exclude='node_modules/' +    --exclude='dist/' +    "${SOURCE_DIR}/" "${APP_DIR}/"
+fi
 
 NODE_MAJOR="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true)"
 if [[ -z "${NODE_MAJOR}" || "${NODE_MAJOR}" -lt 20 ]]; then
@@ -70,7 +76,6 @@ SQL
 APP_URL="http://${APP_HOST}"
 COOKIE_SECURE="false"
 cat > "${APP_DIR}/.env" <<EOF
-NODE_ENV=production
 PORT=3000
 APP_URL=${APP_URL}
 COOKIE_SECURE=${COOKIE_SECURE}
@@ -104,6 +109,7 @@ User=novacloud
 Group=novacloud
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node ${APP_DIR}/dist/server.cjs
 Restart=on-failure
 RestartSec=5
