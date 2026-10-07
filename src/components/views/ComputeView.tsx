@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Cpu,
   Plus,
@@ -120,6 +120,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
   const [newSnapVm, setNewSnapVm] = useState('');
 
   const [isWorking, setIsWorking] = useState(false);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
   const isLight = themeMode === 'light';
 
   const readError = async (response: Response, fallback: string) => {
@@ -274,8 +275,8 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
     }
   };
 
-  const handleImportImage = async () => {
-    const url = window.prompt('Enter a direct HTTP/HTTPS URL to an ISO image:');
+  const handleImportImageUrl = async () => {
+    const url = window.prompt('Enter a direct HTTP/HTTPS URL to an ISO or QCOW2 image:');
     if (!url) return;
     let filename = '';
     try {
@@ -294,12 +295,40 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
         body: JSON.stringify({ url, filename: requestedName }),
       });
       if (!response.ok) throw new Error(await readError(response, 'Image import failed'));
-      showToast(`Nova Agent started importing "${requestedName}".`);
-      window.setTimeout(() => loadComputeData(), 3000);
+      showToast(`Nova imported "${requestedName}".`);
+      await loadComputeData();
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Image import failed');
     } finally {
       setIsWorking(false);
+    }
+  };
+
+  const handleImportImageFile = async (file: File) => {
+    if (isWorking) return;
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith('.iso') && !lower.endsWith('.qcow2')) {
+      showToast('Nova currently supports ISO and QCOW2 image uploads.');
+      return;
+    }
+    setIsWorking(true);
+    try {
+      const response = await fetch('/api/compute/images/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Nova-Filename': file.name,
+        },
+        body: file,
+      });
+      if (!response.ok) throw new Error(await readError(response, 'Image upload failed'));
+      showToast(`Nova uploaded "${file.name}".`);
+      await loadComputeData();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Image upload failed');
+    } finally {
+      setIsWorking(false);
+      if (imageFileInputRef.current) imageFileInputRef.current.value = '';
     }
   };
 
@@ -415,7 +444,15 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
         <div className="flex items-center gap-2">
           {currentTab === 'snapshots' && (
             <button
-              onClick={() => setShowCreateSnapModal(true)}
+              onClick={() => {
+                if (!safeVms.length) {
+                  showToast('Create a virtual machine before taking a snapshot.');
+                  return;
+                }
+                setNewSnapVm((current) => current || safeVms[0].id);
+                setShowCreateSnapModal(true);
+              }}
+              disabled={safeVms.length === 0 || isWorking}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs rounded-lg transition-all cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -850,12 +887,30 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
               Verified operating system images and customized gold images preloaded with developer runtimes and hypervisor tools.
             </p>
             <button
-              onClick={handleImportImage}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs rounded-lg transition-colors cursor-pointer"
+              onClick={() => imageFileInputRef.current?.click()}
+              disabled={isWorking}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-50"
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>Import Custom Image</span>
+              <span>{isWorking ? 'Working…' : 'Import Custom Image'}</span>
             </button>
+            <button
+              onClick={handleImportImageUrl}
+              disabled={isWorking}
+              className="ml-2 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 font-semibold text-xs rounded-lg transition-colors disabled:opacity-50"
+            >
+              Import from URL
+            </button>
+            <input
+              ref={imageFileInputRef}
+              type="file"
+              accept=".iso,.qcow2"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) handleImportImageFile(file);
+              }}
+            />
           </div>
 
           <div
@@ -937,7 +992,15 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
               Point-in-time incremental backups of root and attached NVMe block storage volumes.
             </p>
             <button
-              onClick={() => setShowCreateSnapModal(true)}
+              onClick={() => {
+                if (!safeVms.length) {
+                  showToast('Create a virtual machine before taking a snapshot.');
+                  return;
+                }
+                setNewSnapVm((current) => current || safeVms[0].id);
+                setShowCreateSnapModal(true);
+              }}
+              disabled={safeVms.length === 0 || isWorking}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -1261,6 +1324,11 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 <label className="block text-[11px] font-semibold text-slate-400 mb-1">
                   Source Instance
                 </label>
+                {safeVms.length === 0 ? (
+                  <div className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-amber-500/40 text-amber-300">
+                    No virtual machines are available. Create a VM first.
+                  </div>
+                ) : (
                 <select
                   value={newSnapVm}
                   onChange={(e) => setNewSnapVm(e.target.value)}
@@ -1272,6 +1340,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                     </option>
                   ))}
                 </select>
+                )}
               </div>
 
               <div className="flex justify-end gap-2 pt-2">
@@ -1284,9 +1353,10 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold cursor-pointer"
+                  disabled={safeVms.length === 0 || isWorking}
+                  className="px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Take Snapshot
+                  {isWorking ? 'Creating…' : 'Take Snapshot'}
                 </button>
               </div>
             </form>
