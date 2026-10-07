@@ -69,6 +69,16 @@ export const NetworkingView: React.FC<NetworkingViewProps> = ({
   const [newVpcCidr, setNewVpcCidr] = useState('10.20.0.0/16');
   const [activeInspectorModal, setActiveInspectorModal] = useState<'routing' | 'security' | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [vpcs, setVpcs] = useState<Array<{
+    id: string;
+    name: string;
+    cidr: string;
+    gateway: string;
+    bridge: string;
+    nat: boolean;
+    createdAt: string;
+  }>>([]);
+  const [loadingVpcs, setLoadingVpcs] = useState(false);
 
   // Tenant VLAN Matrix state
   const [vlanMatrix, setVlanMatrix] = useState<VlanNetworkMapping[]>([]);
@@ -104,15 +114,36 @@ export const NetworkingView: React.FC<NetworkingViewProps> = ({
     setIsVerifyingVlans(true);
     try {
       const res = await api.verifyVlanIsolation();
-      setIsolationResult(res);
-      showToast('Completed Hardware EVPN/VXLAN Packet Isolation Verification: 0% Cross-Talk.');
+      setIsolationResult(res as any);
+      showToast('Nova VLAN isolation verification completed.');
     } catch (e) {
       console.error(e);
-      showToast('Isolation verification is unavailable until a real network provider is connected.');
+      showToast(e instanceof Error ? e.message : 'Nova VLAN isolation verification is not enabled yet.');
     } finally {
       setIsVerifyingVlans(false);
     }
   };
+
+  const fetchVpcs = async () => {
+    setLoadingVpcs(true);
+    try {
+      const response = await fetch('/api/networking/vpcs');
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error || 'Unable to load Nova networks');
+      }
+      const data = await response.json();
+      setVpcs(Array.isArray(data) ? data : []);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to load Nova networks');
+    } finally {
+      setLoadingVpcs(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'vpcs') fetchVpcs();
+  }, [activeTab]);
 
   const isLight = themeMode === 'light';
 
@@ -121,12 +152,27 @@ export const NetworkingView: React.FC<NetworkingViewProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const handleCreateVpc = (e: React.FormEvent) => {
+  const handleCreateVpc = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newVpcName.trim()) return;
-    setIsCreateVpcOpen(false);
-    showToast(`VPC ${newVpcName} (${newVpcCidr}) created and registered with Anycast routing.`);
-    setNewVpcName('');
+    try {
+      const response = await fetch('/api/networking/vpcs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newVpcName.trim(), cidr: newVpcCidr.trim(), nat: true }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error || 'Network creation failed');
+      }
+      const network = await response.json();
+      setVpcs((current) => [network, ...current]);
+      setIsCreateVpcOpen(false);
+      showToast(`Nova network ${network.name} created on ${network.bridge}.`);
+      setNewVpcName('');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Network creation failed');
+    }
   };
 
   const getNodeIcon = (type: string) => {
@@ -927,14 +973,22 @@ export const NetworkingView: React.FC<NetworkingViewProps> = ({
                 </tr>
               </thead>
               <tbody className={`divide-y ${isLight ? 'divide-slate-200' : 'divide-slate-800/40'}`}>
-                <tr>
-                  <td className="py-3 px-3 text-cyan-600 font-bold">vpc-atl-prod-01</td>
-                  <td className={`py-3 px-3 ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>10.15.0.0/16</td>
-                  <td className="py-3 px-3 text-slate-500 font-sans">US East — Atlanta</td>
-                  <td className={`py-3 px-3 ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>3 Subnets</td>
-                  <td className={`py-3 px-3 ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>NAT GW + Internet GW</td>
-                  <td className="py-3 px-3 text-emerald-600 font-semibold">Available</td>
-                </tr>
+                {loadingVpcs && (
+                  <tr><td colSpan={6} className="py-6 px-3 text-center text-slate-500">Loading Nova networks…</td></tr>
+                )}
+                {!loadingVpcs && vpcs.length === 0 && (
+                  <tr><td colSpan={6} className="py-6 px-3 text-center text-slate-500">No Nova networks created yet.</td></tr>
+                )}
+                {vpcs.map((vpc) => (
+                  <tr key={vpc.id}>
+                    <td className="py-3 px-3 text-cyan-600 font-bold">{vpc.name}</td>
+                    <td className={`py-3 px-3 ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>{vpc.cidr}</td>
+                    <td className="py-3 px-3 text-slate-500 font-sans">Local Nova Host</td>
+                    <td className={`py-3 px-3 ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>Nova bridge {vpc.bridge}</td>
+                    <td className={`py-3 px-3 ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>{vpc.nat ? `NAT • Gateway ${vpc.gateway}` : `Gateway ${vpc.gateway}`}</td>
+                    <td className="py-3 px-3 text-emerald-600 font-semibold">Available</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -953,10 +1007,10 @@ export const NetworkingView: React.FC<NetworkingViewProps> = ({
             {activeTab} Configuration Panel
           </div>
           <p className="max-w-md mx-auto text-xs">
-            Active and bound to VPC <strong>vpc-atl-prod-01</strong>. All routing policies and hardware offloads are managed by the Anycast mesh.
+            This Nova networking module is not enabled for this section yet. No configuration will be claimed until the matching Nova engine is available.
           </p>
           <button
-            onClick={() => showToast(`Synchronized settings for ${activeTab}.`)}
+            onClick={() => showToast(`Nova ${activeTab} engine is not enabled yet.`)}
             className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded transition-colors cursor-pointer"
           >
             Apply Active Policy
