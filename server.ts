@@ -11,6 +11,8 @@ import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { spawn, spawnSync } from 'child_process';
+import http from 'http';
+import net from 'net';
 import { novaAgentConfigured, novaAgentRequest, novaAgentUpload } from './server/novaAgentClient';
 
 dotenv.config();
@@ -761,9 +763,11 @@ app.post('/api/compute/vms', requireAuth, async (req, res) => {
   const diskGb = Number(req.body?.diskGb || 32);
   const bridge = String(req.body?.bridge || 'novabr0');
   const imageId = String(req.body?.imageId || req.body?.iso || '');
+  const bootMode = String(req.body?.bootMode || 'image') === 'blank' ? 'blank' : 'image';
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid VM name is required' });
+  if (bootMode === 'image' && !imageId) return res.status(400).json({ error: 'Select an image from Nova storage before creating the VM' });
 
-  const jobId = await createJob('compute.create', req.session.userId, 'vm', null, { name, cores, memoryMb, diskGb, bridge, imageId });
+  const jobId = await createJob('compute.create', req.session.userId, 'vm', null, { name, cores, memoryMb, diskGb, bridge, imageId, bootMode });
   try {
     const vm = await novaAgentRequest('/v1/instances', 'POST', {
       name,
@@ -772,7 +776,8 @@ app.post('/api/compute/vms', requireAuth, async (req, res) => {
       diskGb,
       bridge,
       imageId: imageId || undefined,
-      start: true,
+      bootMode,
+      start: bootMode === 'image',
     });
     await finishJob(jobId, 'succeeded', vm);
     await syncNovaAgentInventory();
@@ -786,6 +791,27 @@ app.post('/api/compute/vms', requireAuth, async (req, res) => {
     const message = error instanceof Error ? error.message : 'VM creation failed';
     await finishJob(jobId, 'failed', {}, message);
     res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.get('/api/compute/vms/:id/console', requireAuth, async (req, res) => {
+  try {
+    const consoleInfo = await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.id)}/console`);
+    if (!consoleInfo?.running) return res.status(409).json({ error: 'Start the VM before opening its graphical console' });
+    const vm = String(req.params.id);
+    const signature = crypto
+      .createHmac('sha256', String(process.env.SESSION_SECRET))
+      .update(vm)
+      .digest('hex');
+    const pathValue = `api/compute/console-ws?vm=${encodeURIComponent(vm)}&sig=${signature}`;
+    res.json({
+      type: 'novnc',
+      vm,
+      running: true,
+      url: `/novnc/vnc.html?autoconnect=1&resize=scale&path=${encodeURIComponent(pathValue)}`,
+    });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to open VM console' });
   }
 });
 
@@ -1491,11 +1517,51 @@ async function startServer() {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
+    const noVncPath = '/usr/share/novnc';
+    if (fs.existsSync(noVncPath)) app.use('/novnc', express.static(noVncPath));
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
-  app.listen(port, '127.0.0.1', () => {
+
+  const server = http.createServer(app);
+  server.on('upgrade', (req, socket, head) => {
+    try {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      if (requestUrl.pathname !== '/api/compute/console-ws') {
+        socket.destroy();
+        return;
+      }
+      const vm = String(requestUrl.searchParams.get('vm') || '');
+      const sig = String(requestUrl.searchParams.get('sig') || '');
+      const expected = crypto
+        .createHmac('sha256', String(process.env.SESSION_SECRET))
+        .update(vm)
+        .digest('hex');
+      if (!vm || sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+        socket.destroy();
+        return;
+      }
+
+      const upstream = net.createConnection({ host: '127.0.0.1', port: 6080 }, () => {
+        const headers = Object.entries(req.headers)
+          .filter(([key]) => key.toLowerCase() !== 'host')
+          .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value || ''}\r\n`)
+          .join('');
+        upstream.write(
+          `${req.method || 'GET'} /websockify?token=${encodeURIComponent(vm)} HTTP/1.1\r\nHost: 127.0.0.1:6080\r\n${headers}\r\n`
+        );
+        if (head?.length) upstream.write(head);
+        socket.pipe(upstream).pipe(socket);
+      });
+      upstream.on('error', () => socket.destroy());
+      socket.on('error', () => upstream.destroy());
+    } catch {
+      socket.destroy();
+    }
+  });
+
+  server.listen(port, '127.0.0.1', () => {
     console.log(`Cyverax Nova listening on http://127.0.0.1:${port}`);
     if (novaAgentConfigured()) {
       syncNovaAgentInventory().catch((error) => console.error('Initial Nova Agent sync failed', error));
