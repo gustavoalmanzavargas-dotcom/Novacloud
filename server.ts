@@ -1390,6 +1390,60 @@ app.get('/api/iam/users', requireAuth, async (_req, res) => {
   res.json(result.rows);
 });
 
+app.post('/api/iam/users', requireAdmin, async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const displayName = String(req.body?.displayName || '').trim();
+  const requestedRole = String(req.body?.role || 'operator');
+  const role = ['admin', 'operator', 'viewer'].includes(requestedRole) ? requestedRole : 'operator';
+  if (!displayName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'A valid display name and email are required' });
+  }
+  const tempPassword = crypto.randomBytes(18).toString('base64url');
+  const passwordHash = await bcrypt.hash(tempPassword, 12);
+  try {
+    const result = await pool.query(
+      `INSERT INTO users (email, display_name, password_hash, role, active)
+       VALUES ($1, $2, $3, $4, TRUE)
+       RETURNING id, email, display_name AS "displayName", role, active,
+                 created_at AS "createdAt", last_login_at AS "lastLoginAt"`,
+      [email, displayName, passwordHash, role],
+    );
+    await pool.query(
+      `INSERT INTO activity_events (actor, action, resource, status)
+       VALUES ($1, 'iam.user.create', $2, 'SUCCESS')`,
+      [String(req.session.userId || 'user'), result.rows[0].id],
+    );
+    res.status(201).json({ ...result.rows[0], temporaryPassword: tempPassword });
+  } catch (error: any) {
+    if (error?.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to create user' });
+  }
+});
+
+app.patch('/api/iam/users/:id', requireAdmin, async (req, res) => {
+  const role = req.body?.role ? String(req.body.role) : undefined;
+  const active = typeof req.body?.active === 'boolean' ? req.body.active : undefined;
+  if (role && !['admin', 'operator', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  const current = await pool.query('SELECT id, role, active FROM users WHERE id = $1', [req.params.id]);
+  if (!current.rows[0]) return res.status(404).json({ error: 'User not found' });
+  const result = await pool.query(
+    `UPDATE users SET role = $2, active = $3 WHERE id = $1
+     RETURNING id, email, display_name AS "displayName", role, active,
+               created_at AS "createdAt", last_login_at AS "lastLoginAt"`,
+    [req.params.id, role || current.rows[0].role, active ?? current.rows[0].active],
+  );
+  res.json(result.rows[0]);
+});
+
+app.post('/api/security/remediate/:id', requireAdmin, async (req, res) => {
+  const finding = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'security_alert' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!finding.rows[0]) return res.status(404).json({ error: 'Security finding not found' });
+  res.status(409).json({ error: 'This finding does not have an automated Nova remediation handler. No changes were applied.' });
+});
+
 app.get('/api/resources', requireAuth, async (req, res) => {
   const type = typeof req.query.type === 'string' ? req.query.type : null;
   const result = type
