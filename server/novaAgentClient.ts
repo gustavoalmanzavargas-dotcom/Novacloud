@@ -8,7 +8,7 @@ export function novaAgentConfigured() {
   return Boolean(baseUrl && token);
 }
 
-export async function novaAgentRequest(pathname: string, method = 'GET', body?: unknown): Promise<any> {
+export async function novaAgentRequest(pathname: string, method = 'GET', body?: unknown, timeoutMs = 30000): Promise<any> {
   if (!novaAgentConfigured()) throw new Error('Nova Agent is not configured');
   const target = new URL(pathname, baseUrl + '/');
   const transport = target.protocol === 'https:' ? https : http;
@@ -42,7 +42,7 @@ export async function novaAgentRequest(pathname: string, method = 'GET', body?: 
         resolve(decoded);
       });
     });
-    request.setTimeout(30000, () => request.destroy(new Error('Nova Agent request timed out')));
+    request.setTimeout(timeoutMs, () => request.destroy(new Error('Nova Agent request timed out')));
     request.on('error', reject);
     if (payload) request.write(payload);
     request.end();
