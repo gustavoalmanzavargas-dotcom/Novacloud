@@ -12,6 +12,7 @@ import { ComputeView } from './components/views/ComputeView';
 import { VmDetailView } from './components/views/VmDetailView';
 import { NetworkingView } from './components/views/NetworkingView';
 import { ApplicationsView } from './components/views/ApplicationsView';
+import { ContainersView } from './components/views/ContainersView';
 import { AiView } from './components/views/AiView';
 import { DatabasesView } from './components/views/DatabasesView';
 import { StorageView } from './components/views/StorageView';
@@ -250,7 +251,9 @@ export default function App() {
                 activeSubTab={activeSubTab}
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />
-            ) : activeView === 'applications' || activeView === 'containers' ? (
+            ) : activeView === 'containers' ? (
+              <ContainersView themeMode={themeMode} />
+            ) : activeView === 'applications' ? (
               <ApplicationsView
                 applications={applications}
                 themeMode={themeMode}

@@ -18,7 +18,7 @@ AGENT_BIND="${NOVA_AGENT_BIND:-0.0.0.0}"
 
 echo "Installing Nova Agent host dependencies..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables novnc websockify
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables novnc websockify systemd-container debootstrap util-linux
 
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "Node.js/npm are not installed. Installing the Debian packages..."
