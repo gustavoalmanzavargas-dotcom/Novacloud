@@ -50,12 +50,13 @@ async function syncNovaAgentInventory() {
   if (!novaAgentConfigured()) return;
   if (novaSyncInFlight) return novaSyncInFlight;
   novaSyncInFlight = (async () => {
-  const [host, instances, images, networks, volumes] = await Promise.all([
+  const [host, instances, images, networks, volumes, apps] = await Promise.all([
     novaAgentRequest('/v1/host'),
     novaAgentRequest('/v1/instances'),
     novaAgentRequest('/v1/images'),
     novaAgentRequest('/v1/networks'),
     novaAgentRequest('/v1/volumes'),
+    novaAgentRequest('/v1/apps'),
   ]);
 
   const hostResult = await pool.query(
@@ -183,12 +184,52 @@ async function syncNovaAgentInventory() {
     await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'storage'`);
   }
 
+  const appIds: string[] = [];
+  for (const appState of Array.isArray(apps) ? apps : []) {
+    appIds.push(appState.id);
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('application', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [appState.id, {
+        id: appState.id,
+        name: appState.name,
+        status: appState.status,
+        domain: appState.domain || '',
+        url: appState.domain ? `https://${appState.domain}` : `http://127.0.0.1:${appState.port}`,
+        infrastructure: 'Nova Agent',
+        lastDeployment: appState.updatedAt,
+        lastDeploy: appState.updatedAt,
+        health: appState.status === 'Running' ? 'Healthy' : appState.status === 'Failed' ? 'Failed' : 'Degraded',
+        replicas: 1,
+        cpuUsagePct: 0,
+        memUsageMb: 0,
+        gitBranch: appState.branch,
+        branch: appState.branch,
+        port: appState.port,
+        type: 'Git Application',
+        repoUrl: appState.repoUrl,
+      }],
+    );
+  }
+  if (appIds.length) {
+    await pool.query(
+      `DELETE FROM resources WHERE provider = 'nova-native' AND type = 'application'
+       AND NOT (external_id = ANY($1::text[]))`,
+      [appIds],
+    );
+  } else {
+    await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'application'`);
+  }
+
   publishNovaEvent('resource-sync', {
     hostId: host.id,
     instances: instanceIds.length,
     images: Array.isArray(images) ? images.length : 0,
     networks: networkIds.length,
     volumes: volumeIds.length,
+    applications: appIds.length,
     timestamp: new Date().toISOString(),
   });
   })().finally(() => {
@@ -879,6 +920,76 @@ app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
     const message = error instanceof Error ? error.message : `VM ${action} failed`;
     await finishJob(jobId, 'failed', {}, message);
     res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.get('/api/applications', requireAuth, async (_req, res) => {
+  try {
+    res.json(await novaAgentRequest('/v1/apps'));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Nova applications' });
+  }
+});
+
+app.post('/api/applications', requireAuth, async (req, res) => {
+  const payload = {
+    name: String(req.body?.name || '').trim(),
+    sourceType: String(req.body?.sourceType || 'git'),
+    repoUrl: String(req.body?.repoUrl || '').trim(),
+    branch: String(req.body?.branch || 'main').trim(),
+    buildCommand: String(req.body?.buildCommand || 'npm run build').trim(),
+    startCommand: String(req.body?.startCommand || 'npm start').trim(),
+    outputDir: String(req.body?.outputDir || 'dist').trim(),
+    envVars: String(req.body?.envVars || ''),
+    domain: String(req.body?.domain || '').trim(),
+  };
+  const jobId = await createJob('application.deploy', req.session.userId, 'application', null, payload);
+  try {
+    const appState = await novaAgentRequest('/v1/apps', 'POST', payload);
+    await finishJob(jobId, 'succeeded', appState);
+    await syncNovaAgentInventory();
+    res.status(201).json({ ...appState, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Application deployment failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.post('/api/applications/:id/redeploy', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const jobId = await createJob('application.redeploy', req.session.userId, 'application', id, {});
+  try {
+    const appState = await novaAgentRequest(`/v1/apps/${encodeURIComponent(id)}/redeploy`, 'POST', {});
+    await finishJob(jobId, 'succeeded', appState);
+    await syncNovaAgentInventory();
+    res.json({ ...appState, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Application redeploy failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.post('/api/applications/:id/action', requireAuth, async (req, res) => {
+  try {
+    const appState = await novaAgentRequest(
+      `/v1/apps/${encodeURIComponent(req.params.id)}/action`,
+      'POST',
+      { action: String(req.body?.action || '') },
+    );
+    await syncNovaAgentInventory();
+    res.json(appState);
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Application action failed' });
+  }
+});
+
+app.get('/api/applications/:id/logs', requireAuth, async (req, res) => {
+  try {
+    res.json(await novaAgentRequest(`/v1/apps/${encodeURIComponent(req.params.id)}/logs`));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load application logs' });
   }
 });
 
