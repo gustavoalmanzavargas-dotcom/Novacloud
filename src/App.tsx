@@ -51,20 +51,27 @@ export default function App() {
 
   // App Shell States
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const getSystemTheme = (): 'dark' | 'light' =>
-    window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  const getSystemTheme = (): 'dark' | 'light' => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  };
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() => getSystemTheme());
   const [selectedEnvironment, setSelectedEnvironment] = useState('Production');
   const [selectedRegion, setSelectedRegion] = useState('us-atl-1');
 
   // System theme is authoritative. Nova follows OS/browser appearance changes live.
   useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const applySystemTheme = (dark: boolean) => setThemeMode(dark ? 'dark' : 'light');
     applySystemTheme(media.matches);
     const listener = (event: MediaQueryListEvent) => applySystemTheme(event.matches);
-    media.addEventListener?.('change', listener);
-    return () => media.removeEventListener?.('change', listener);
+    if (typeof media.addEventListener === 'function') media.addEventListener('change', listener);
+    else if (typeof (media as any).addListener === 'function') (media as any).addListener(listener);
+    return () => {
+      if (typeof media.removeEventListener === 'function') media.removeEventListener('change', listener);
+      else if (typeof (media as any).removeListener === 'function') (media as any).removeListener(listener);
+    };
   }, []);
 
   useEffect(() => {
