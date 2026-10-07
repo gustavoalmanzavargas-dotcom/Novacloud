@@ -378,6 +378,69 @@ function stopInstance(instance: InstanceState) {
   return currentState(instance);
 }
 
+type NovaBlockDevice = {
+  name: string;
+  path: string;
+  type: string;
+  sizeBytes: number;
+  model: string;
+  serial: string;
+  transport: string;
+  rotational: boolean | null;
+  filesystem: string;
+  fsLabel: string;
+  mountpoints: string[];
+  readOnly: boolean;
+  parent: string;
+  children: NovaBlockDevice[];
+};
+
+function discoverBlockDevices(): NovaBlockDevice[] {
+  if (!commandExists('lsblk')) return [];
+  const output = spawnSync('lsblk', [
+    '--json',
+    '--bytes',
+    '--output', 'NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,ROTA,FSTYPE,LABEL,MOUNTPOINTS,RO,PKNAME',
+  ], { encoding: 'utf8', timeout: 10000 });
+  if (output.error || output.status !== 0) return [];
+  try {
+    const parsed = JSON.parse(output.stdout || '{"blockdevices":[]}');
+    const normalize = (item: any): NovaBlockDevice => ({
+      name: String(item.name || ''),
+      path: String(item.path || ''),
+      type: String(item.type || ''),
+      sizeBytes: Number(item.size || 0),
+      model: String(item.model || '').trim(),
+      serial: String(item.serial || '').trim(),
+      transport: String(item.tran || '').trim(),
+      rotational: item.rota === null || item.rota === undefined ? null : Boolean(Number(item.rota)),
+      filesystem: String(item.fstype || ''),
+      fsLabel: String(item.label || ''),
+      mountpoints: Array.isArray(item.mountpoints) ? item.mountpoints.filter(Boolean).map(String) : [],
+      readOnly: Boolean(Number(item.ro || 0)),
+      parent: String(item.pkname || ''),
+      children: Array.isArray(item.children) ? item.children.map(normalize) : [],
+    });
+    return Array.isArray(parsed.blockdevices) ? parsed.blockdevices.map(normalize) : [];
+  } catch {
+    return [];
+  }
+}
+
+function storageMounts() {
+  const output = spawnSync('findmnt', ['--json', '--bytes', '--output', 'SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE%'], {
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+  if (output.error || output.status !== 0) return [];
+  try {
+    const parsed = JSON.parse(output.stdout || '{"filesystems":[]}');
+    return Array.isArray(parsed.filesystems) ? parsed.filesystems : [];
+  } catch {
+    return [];
+  }
+}
+
 function hostFacts() {
   const cpus = os.cpus();
   const totalMemory = os.totalmem();
@@ -408,6 +471,8 @@ function hostFacts() {
       totalBytes: stat.blocks * stat.bsize,
       freeBytes: stat.bavail * stat.bsize,
       usedBytes: (stat.blocks - stat.bfree) * stat.bsize,
+      devices: discoverBlockDevices(),
+      mounts: storageMounts(),
     },
     capabilities: {
       kvm: fs.existsSync('/dev/kvm'),
@@ -460,6 +525,20 @@ function download(urlText: string, destination: string): Promise<void> {
 
 app.get('/v1/health', (_req, res) => res.json({ status: 'ok', service: 'nova-agent', version: '0.1.0' }));
 app.get('/v1/host', (_req, res) => res.json(hostFacts()));
+
+app.get('/v1/storage/devices', (_req, res) => {
+  const facts = hostFacts();
+  res.json({
+    statePath: facts.storage.path,
+    stateFilesystem: {
+      totalBytes: facts.storage.totalBytes,
+      freeBytes: facts.storage.freeBytes,
+      usedBytes: facts.storage.usedBytes,
+    },
+    devices: facts.storage.devices,
+    mounts: facts.storage.mounts,
+  });
+});
 app.get('/v1/instances', (_req, res) => res.json(listInstances()));
 
 app.post('/v1/instances', (req, res) => {
