@@ -26,6 +26,8 @@ import {
   Key,
   Server,
   RefreshCw,
+  X,
+  Monitor,
 } from 'lucide-react';
 import { VMInstance } from '../../types';
 
@@ -118,6 +120,19 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
   const [showCreateSnapModal, setShowCreateSnapModal] = useState(false);
   const [newSnapName, setNewSnapName] = useState('');
   const [newSnapVm, setNewSnapVm] = useState('');
+  const [showVmWizard, setShowVmWizard] = useState(false);
+  const [computeOptions, setComputeOptions] = useState<any>(null);
+  const [vmForm, setVmForm] = useState({
+    name: '',
+    bootMode: 'image' as 'image' | 'blank',
+    imageId: '',
+    node: '',
+    storage: '',
+    bridge: '',
+    cores: 2,
+    memoryMb: 4096,
+    diskGb: 32,
+  });
 
   const [isWorking, setIsWorking] = useState(false);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
@@ -332,40 +347,93 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
     }
   };
 
-  const handleLaunchInstance = async () => {
+  const handleLaunchInstance = async (preselectedImageId?: string) => {
     if (isWorking) return;
     setIsWorking(true);
     try {
       const optionsResponse = await fetch('/api/compute/options');
       if (!optionsResponse.ok) throw new Error(await readError(optionsResponse, 'Unable to load Nova compute options'));
       const options = await optionsResponse.json();
-      if (!options.configured) throw new Error('Connect a Nova Agent before creating an instance.');
-      const name = window.prompt('VM name:');
-      if (!name) return;
-      const node = window.prompt('Nova compute host:', options.nodes?.[0] || '');
-      if (!node) return;
-      const matchingStorage = options.storages?.find((item: any) => item.node === node)?.storage || options.storages?.[0]?.storage || '';
-      const storage = window.prompt('VM disk storage:', matchingStorage);
-      if (!storage) return;
-      const bridge = window.prompt('Network bridge:', options.bridges?.[0] || 'vmbr0');
-      if (!bridge) return;
-      const iso = window.prompt('ISO volume ID (optional, e.g. local:iso/debian.iso):', images.find((item: any) => item.id)?.id || '') || '';
-      const cores = Number(window.prompt('vCPU cores:', '2') || '2');
-      const memoryMb = Number(window.prompt('Memory in MiB:', '4096') || '4096');
-      const diskGb = Number(window.prompt('Disk size in GiB:', '32') || '32');
+      if (!options.configured) throw new Error('Nova Agent is not connected.');
+      const availableImages = Array.isArray(options.images) ? options.images : [];
+      const selectedImage = preselectedImageId || availableImages[0]?.id || '';
+      const node = options.nodes?.[0] || '';
+      const storage = options.storages?.find((item: any) => item.node === node)?.storage || options.storages?.[0]?.storage || 'nova-local';
+      const bridge = options.bridges?.[0] || 'user';
+      setComputeOptions(options);
+      setVmForm({
+        name: '',
+        bootMode: selectedImage ? 'image' : 'blank',
+        imageId: selectedImage,
+        node,
+        storage,
+        bridge,
+        cores: 2,
+        memoryMb: 4096,
+        diskGb: 32,
+      });
+      setShowVmWizard(true);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to open VM wizard');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const submitVmWizard = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (isWorking) return;
+    if (!vmForm.name.trim()) {
+      showToast('Enter a VM name.');
+      return;
+    }
+    if (vmForm.bootMode === 'image' && !vmForm.imageId) {
+      showToast('Select an image from Nova storage.');
+      return;
+    }
+    setIsWorking(true);
+    try {
       const response = await fetch('/api/compute/vms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, node, storage, bridge, iso, cores, memoryMb, diskGb, vmid: options.nextId }),
+        body: JSON.stringify({
+          name: vmForm.name.trim(),
+          node: vmForm.node,
+          storage: vmForm.storage,
+          bridge: vmForm.bridge,
+          imageId: vmForm.bootMode === 'image' ? vmForm.imageId : '',
+          bootMode: vmForm.bootMode,
+          cores: Number(vmForm.cores),
+          memoryMb: Number(vmForm.memoryMb),
+          diskGb: Number(vmForm.diskGb),
+        }),
       });
-      if (!response.ok) throw new Error(await readError(response, 'VM creation failed'));
-      const result = await response.json();
-      showToast(`VM "${result.name || name}" created by Nova.`);
-      window.setTimeout(() => window.location.reload(), 2500);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'VM creation failed');
+      setShowVmWizard(false);
+      showToast(
+        body.status === 'Running'
+          ? `VM "${body.name || vmForm.name}" is running.`
+          : `VM "${body.name || vmForm.name}" was created in ${body.status || 'Stopped'} state.`
+      );
+      window.setTimeout(() => window.location.reload(), 1200);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'VM creation failed');
     } finally {
       setIsWorking(false);
+    }
+  };
+
+  const openVmConsole = async (vm: VMInstance) => {
+    try {
+      const response = await fetch(`/api/compute/vms/${encodeURIComponent(vm.id)}/console`);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Unable to open VM console');
+      const popup = window.open(body.url, `nova-vm-${vm.id}`, 'width=1280,height=800,resizable=yes,scrollbars=no');
+      if (!popup) throw new Error('Browser blocked the console window. Allow pop-ups for NovaCloud.');
+      popup.focus();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to open VM console');
     }
   };
 
@@ -470,7 +538,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
           )}
           <button
             id="compute-create-instance-btn"
-            onClick={handleLaunchInstance}
+            onClick={() => handleLaunchInstance()}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm hover:shadow-cyan-500/25 transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4 stroke-[3]" />
@@ -858,6 +926,14 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                               )}
                             </button>
                             <button
+                              onClick={() => openVmConsole(vm)}
+                              disabled={vm.status !== 'Running'}
+                              className={`px-2 py-1 font-semibold rounded text-[11px] transition-colors ${vm.status === 'Running' ? 'cursor-pointer bg-slate-800 hover:bg-slate-700 text-emerald-400' : 'cursor-not-allowed bg-slate-900 text-slate-600'}`}
+                              title={vm.status === 'Running' ? 'Open graphical noVNC console' : 'Start VM to open console'}
+                            >
+                              Console
+                            </button>
+                            <button
                               onClick={() => onSelectVM(vm)}
                               className={`px-2 py-1 font-semibold rounded text-[11px] transition-colors cursor-pointer ${
                                 isLight
@@ -970,7 +1046,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={handleLaunchInstance}
+                        onClick={() => handleLaunchInstance(img.id)}
                         className="px-2.5 py-1 text-xs font-semibold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 rounded transition-colors cursor-pointer"
                       >
                         Deploy
@@ -1210,6 +1286,157 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CREATE VIRTUAL MACHINE */}
+      {showVmWizard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className={`w-full max-w-2xl rounded-xl border shadow-2xl overflow-hidden ${isLight ? 'bg-white border-slate-300 text-slate-900' : 'bg-slate-900 border-slate-700 text-slate-100'}`}>
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <Server className="w-4 h-4 text-cyan-400" />
+                  Create Virtual Machine
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-1">Configure the VM before Nova creates anything.</p>
+              </div>
+              <button onClick={() => !isWorking && setShowVmWizard(false)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={submitVmWizard} className="p-5 space-y-5 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">VM Name</label>
+                  <input
+                    value={vmForm.name}
+                    onChange={(e) => setVmForm((v) => ({ ...v, name: e.target.value }))}
+                    placeholder="e.g. debian-web-01"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">Compute Host</label>
+                  <select
+                    value={vmForm.node}
+                    onChange={(e) => setVmForm((v) => ({ ...v, node: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                  >
+                    {(computeOptions?.nodes || []).map((node: string) => <option key={node} value={node}>{node}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Disc className="w-4 h-4 text-cyan-400" />
+                  <span className="font-bold">Boot Source</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setVmForm((v) => ({ ...v, bootMode: 'image' }))}
+                    className={`p-3 rounded-lg border text-left ${vmForm.bootMode === 'image' ? 'border-cyan-500 bg-cyan-500/10 text-cyan-300' : 'border-slate-700 bg-slate-950 text-slate-400'}`}
+                  >
+                    <div className="font-semibold">Nova Image Storage</div>
+                    <div className="text-[10px] mt-1">Install/boot from an ISO or QCOW2 already imported into Nova.</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVmForm((v) => ({ ...v, bootMode: 'blank', imageId: '' }))}
+                    className={`p-3 rounded-lg border text-left ${vmForm.bootMode === 'blank' ? 'border-amber-500 bg-amber-500/10 text-amber-300' : 'border-slate-700 bg-slate-950 text-slate-400'}`}
+                  >
+                    <div className="font-semibold">Empty Disk</div>
+                    <div className="text-[10px] mt-1">Creates a stopped VM with no operating system. Nova will not call it running.</div>
+                  </button>
+                </div>
+
+                {vmForm.bootMode === 'image' && (
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-400 mb-1">Select Image</label>
+                    {(computeOptions?.images || []).length ? (
+                      <select
+                        value={vmForm.imageId}
+                        onChange={(e) => setVmForm((v) => ({ ...v, imageId: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                        required
+                      >
+                        <option value="">Select an image…</option>
+                        {(computeOptions?.images || []).map((image: any) => (
+                          <option key={image.id} value={image.id}>
+                            {image.name} — {image.format?.toUpperCase() || 'IMAGE'} — {(Number(image.sizeBytes || 0) / 1024 ** 3).toFixed(2)} GB
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-300">
+                        No images are stored in Nova yet. Import an ISO or QCOW2 under Images & Templates first.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">vCPU</label>
+                  <input type="number" min="1" max="256" value={vmForm.cores}
+                    onChange={(e) => setVmForm((v) => ({ ...v, cores: Number(e.target.value) }))}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">Memory (MiB)</label>
+                  <input type="number" min="512" step="512" value={vmForm.memoryMb}
+                    onChange={(e) => setVmForm((v) => ({ ...v, memoryMb: Number(e.target.value) }))}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">Disk (GiB)</label>
+                  <input type="number" min="4" value={vmForm.diskGb}
+                    onChange={(e) => setVmForm((v) => ({ ...v, diskGb: Number(e.target.value) }))}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">Disk Storage</label>
+                  <select value={vmForm.storage} onChange={(e) => setVmForm((v) => ({ ...v, storage: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100">
+                    {(computeOptions?.storages || []).map((storage: any) => (
+                      <option key={storage.storage} value={storage.storage}>{storage.storage} ({storage.type})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">Network</label>
+                  <select value={vmForm.bridge} onChange={(e) => setVmForm((v) => ({ ...v, bridge: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100">
+                    {(computeOptions?.bridges || []).map((bridge: string) => <option key={bridge} value={bridge}>{bridge}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-[11px] text-slate-400">
+                VM console: graphical noVNC. After the VM reaches Running, use the Console button in the VM table.
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                <button type="button" onClick={() => setShowVmWizard(false)} disabled={isWorking}
+                  className="px-3 py-2 rounded-lg border border-slate-700 text-slate-300">
+                  Cancel
+                </button>
+                <button type="submit"
+                  disabled={isWorking || (vmForm.bootMode === 'image' && !vmForm.imageId)}
+                  className="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold disabled:opacity-40 disabled:cursor-not-allowed">
+                  {isWorking ? 'Creating VM…' : vmForm.bootMode === 'blank' ? 'Create Stopped VM' : 'Create & Start VM'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

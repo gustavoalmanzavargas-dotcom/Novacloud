@@ -18,7 +18,7 @@ AGENT_BIND="${NOVA_AGENT_BIND:-0.0.0.0}"
 
 echo "Installing Nova Agent host dependencies..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables novnc websockify
 
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "Node.js/npm are not installed. Installing the Debian packages..."
@@ -34,6 +34,8 @@ else
 fi
 
 mkdir -p "${APP_DIR}" "${STATE_DIR}"/{instances,images,disks}
+touch "${STATE_DIR}/novnc.tokens"
+chmod 600 "${STATE_DIR}/novnc.tokens"
 if [[ "${SOURCE_DIR}" != "${APP_DIR}" ]]; then
   rsync -a --exclude='.env' --exclude='node_modules/' --exclude='dist/' "${SOURCE_DIR}/" "${APP_DIR}/"
 fi
@@ -99,8 +101,25 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/nova-novnc.service <<EOF
+[Unit]
+Description=Cyverax Nova noVNC Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc --token-plugin=TokenFile --token-source=${STATE_DIR}/novnc.tokens 127.0.0.1:6080
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now nova-agent
+systemctl enable --now nova-novnc
 
 echo
 echo "Nova Agent installed."
