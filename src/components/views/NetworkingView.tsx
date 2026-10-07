@@ -28,6 +28,8 @@ interface NetworkingViewProps {
   onTabChange?: (tab: NetSubTab) => void;
 }
 
+const TOPOLOGY_NODES: NetworkTopologyNode[] = [];
+
 type NetSubTab =
   | 'topology'
   | 'vlans'
