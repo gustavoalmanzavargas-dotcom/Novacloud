@@ -41,40 +41,61 @@ function proxmoxConfigured() {
   return Boolean(proxmoxHost && proxmoxTokenId && proxmoxTokenSecret);
 }
 
-function proxmoxGet(pathname: string): Promise<any> {
+function proxmoxRequest(pathname: string, method = 'GET', body?: Record<string, string | number | boolean>): Promise<any> {
   if (!proxmoxConfigured()) {
     return Promise.reject(new Error('Proxmox provider is not configured'));
   }
   const target = new URL(pathname, proxmoxHost.endsWith('/') ? proxmoxHost : `${proxmoxHost}/`);
   const transport = target.protocol === 'http:' ? http : https;
+  const encoded = body
+    ? new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)])).toString()
+    : '';
+
   return new Promise((resolve, reject) => {
     const request = transport.request(target, {
-      method: 'GET',
+      method,
       headers: {
         Authorization: `PVEAPIToken=${proxmoxTokenId}=${proxmoxTokenSecret}`,
         Accept: 'application/json',
+        ...(encoded ? {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(encoded),
+        } : {}),
       },
       ...(target.protocol === 'https:' ? { rejectUnauthorized: proxmoxVerifyTls } : {}),
     }, (response) => {
-      let body = '';
+      let responseBody = '';
       response.setEncoding('utf8');
-      response.on('data', (chunk) => { body += chunk; });
+      response.on('data', (chunk) => { responseBody += chunk; });
       response.on('end', () => {
         if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`Proxmox API returned HTTP ${response.statusCode || 0}`));
+          let detail = responseBody;
+          try {
+            detail = JSON.stringify(JSON.parse(responseBody)?.errors || JSON.parse(responseBody)?.message || responseBody);
+          } catch {}
+          reject(new Error(`Proxmox API returned HTTP ${response.statusCode || 0}${detail ? `: ${detail}` : ''}`));
+          return;
+        }
+        if (!responseBody.trim()) {
+          resolve(null);
           return;
         }
         try {
-          resolve(JSON.parse(body)?.data ?? []);
+          resolve(JSON.parse(responseBody)?.data ?? null);
         } catch {
-          reject(new Error('Proxmox returned invalid JSON'));
+          resolve(responseBody);
         }
       });
     });
-    request.setTimeout(10000, () => request.destroy(new Error('Proxmox API request timed out')));
+    request.setTimeout(30000, () => request.destroy(new Error('Proxmox API request timed out')));
     request.on('error', reject);
+    if (encoded) request.write(encoded);
     request.end();
   });
+}
+
+function proxmoxGet(pathname: string): Promise<any> {
+  return proxmoxRequest(pathname, 'GET');
 }
 
 async function upsertProviderResource(type: string, externalId: string, data: Record<string, unknown>) {
@@ -272,6 +293,212 @@ app.post('/api/providers/proxmox/sync', requireAuth, async (_req, res) => {
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Proxmox sync failed' });
   }
+});
+
+app.get('/api/compute/images', requireAuth, async (_req, res) => {
+  if (!proxmoxConfigured()) return res.json([]);
+  try {
+    const nodes = await proxmoxGet('/api2/json/nodes');
+    const images: any[] = [];
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      const nodeName = String(node.node || '');
+      if (!nodeName) continue;
+      const storages = await proxmoxGet(`/api2/json/nodes/${encodeURIComponent(nodeName)}/storage`);
+      for (const storage of Array.isArray(storages) ? storages : []) {
+        const storageName = String(storage.storage || '');
+        const contentTypes = String(storage.content || '');
+        if (!storageName || (!contentTypes.includes('iso') && !contentTypes.includes('vztmpl'))) continue;
+        const content = await proxmoxGet(
+          `/api2/json/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storageName)}/content`
+        );
+        for (const item of Array.isArray(content) ? content : []) {
+          if (!['iso', 'vztmpl'].includes(String(item.content || ''))) continue;
+          const volid = String(item.volid || '');
+          const filename = volid.split('/').pop() || volid;
+          images.push({
+            id: volid,
+            name: filename,
+            distribution: item.content === 'vztmpl' ? 'LXC Template' : 'ISO Image',
+            version: '—',
+            arch: 'x86_64',
+            size: `${(Number(item.size || 0) / 1024 ** 3).toFixed(2)} GB`,
+            type: item.content === 'vztmpl' ? 'Public Golden' : 'Custom AMI',
+            status: 'Ready',
+            node: nodeName,
+            storage: storageName,
+            content: item.content,
+          });
+        }
+      }
+    }
+    res.json(images);
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read Proxmox image inventory' });
+  }
+});
+
+app.post('/api/compute/images/import-url', requireAuth, async (req, res) => {
+  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
+  const url = String(req.body?.url || '').trim();
+  const filename = String(req.body?.filename || '').trim();
+  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'A valid HTTP or HTTPS image URL is required' });
+  if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename)) return res.status(400).json({ error: 'A safe filename is required' });
+  try {
+    const nodes = await proxmoxGet('/api2/json/nodes');
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      const nodeName = String(node.node || '');
+      if (!nodeName) continue;
+      const storages = await proxmoxGet(`/api2/json/nodes/${encodeURIComponent(nodeName)}/storage`);
+      const target = (Array.isArray(storages) ? storages : []).find((item: any) =>
+        String(item.content || '').includes('iso') && Number(item.active ?? 1) === 1
+      );
+      if (!target) continue;
+      const task = await proxmoxRequest(
+        `/api2/json/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(String(target.storage))}/download-url`,
+        'POST',
+        { url, filename, 'content': 'iso' }
+      );
+      return res.status(202).json({ success: true, task, node: nodeName, storage: target.storage, filename });
+    }
+    res.status(400).json({ error: 'No active Proxmox storage accepting ISO content was found' });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Proxmox image import failed' });
+  }
+});
+
+app.get('/api/compute/snapshots', requireAuth, async (_req, res) => {
+  if (!proxmoxConfigured()) return res.json([]);
+  try {
+    const inventory = await pool.query(
+      `SELECT external_id, data FROM resources WHERE provider = 'proxmox' AND type = 'vm' ORDER BY updated_at DESC`
+    );
+    const snapshots: any[] = [];
+    for (const row of inventory.rows) {
+      const data = row.data || {};
+      const node = String(data.tags?.node || '');
+      const kind = String(data.tags?.kind || 'qemu');
+      const vmid = String(data.tags?.vmid || '');
+      if (!node || !vmid || !['qemu', 'lxc'].includes(kind)) continue;
+      try {
+        const items = await proxmoxGet(
+          `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/snapshot`
+        );
+        for (const snap of Array.isArray(items) ? items : []) {
+          if (snap.name === 'current') continue;
+          snapshots.push({
+            id: `${kind}:${vmid}:${snap.name}`,
+            name: snap.name,
+            sourceVm: data.name || vmid,
+            sizeGb: Number((Number(data.storageGb || 0)).toFixed(2)),
+            created: snap.snaptime ? new Date(Number(snap.snaptime) * 1000).toISOString() : '—',
+            encryption: 'Provider managed',
+            status: 'Available',
+          });
+        }
+      } catch {}
+    }
+    res.json(snapshots);
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read snapshots' });
+  }
+});
+
+app.post('/api/compute/vms/:id/snapshots', requireAuth, async (req, res) => {
+  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
+  const id = String(req.params.id || '');
+  const snapname = String(req.body?.name || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(snapname)) return res.status(400).json({ error: 'Snapshot name may contain only letters, numbers, underscores, and hyphens' });
+  const row = await pool.query(`SELECT data FROM resources WHERE type = 'vm' AND data->>'id' = $1 LIMIT 1`, [id]);
+  if (!row.rows[0]) return res.status(404).json({ error: 'VM was not found in the synchronized inventory' });
+  const data = row.rows[0].data || {};
+  const node = String(data.tags?.node || '');
+  const kind = String(data.tags?.kind || 'qemu');
+  const vmid = String(data.tags?.vmid || '');
+  if (!node || !vmid || !['qemu', 'lxc'].includes(kind)) return res.status(400).json({ error: 'VM is missing Proxmox provider metadata' });
+  try {
+    const task = await proxmoxRequest(
+      `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/snapshot`,
+      'POST',
+      { snapname }
+    );
+    res.status(202).json({ success: true, task });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Snapshot creation failed' });
+  }
+});
+
+app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
+  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
+  const id = String(req.params.id || '');
+  const action = String(req.body?.action || '');
+  if (!['start', 'stop', 'shutdown', 'reboot', 'delete'].includes(action)) return res.status(400).json({ error: 'Unsupported VM action' });
+  const row = await pool.query(`SELECT data FROM resources WHERE type = 'vm' AND data->>'id' = $1 LIMIT 1`, [id]);
+  if (!row.rows[0]) return res.status(404).json({ error: 'VM was not found in the synchronized inventory' });
+  const data = row.rows[0].data || {};
+  const node = String(data.tags?.node || '');
+  const kind = String(data.tags?.kind || 'qemu');
+  const vmid = String(data.tags?.vmid || '');
+  if (!node || !vmid || !['qemu', 'lxc'].includes(kind)) return res.status(400).json({ error: 'VM is missing Proxmox provider metadata' });
+  try {
+    let task;
+    if (action === 'delete') {
+      task = await proxmoxRequest(
+        `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}`,
+        'DELETE'
+      );
+    } else {
+      task = await proxmoxRequest(
+        `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/status/${action}`,
+        'POST'
+      );
+    }
+    await pool.query(
+      `INSERT INTO activity_events (actor, action, resource, status) VALUES ($1, $2, $3, 'Submitted')`,
+      [String((req as any).session?.userId || 'user'), `compute.${action}`, id],
+    ).catch(() => undefined);
+    if (action === 'delete') {
+      await pool.query(`DELETE FROM resources WHERE type = 'vm' AND data->>'id' = $1`, [id]);
+    }
+    res.status(202).json({ success: true, task, action });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : `VM ${action} failed` });
+  }
+});
+
+app.get('/api/compute/ssh-keys', requireAuth, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT id, data, created_at FROM resources WHERE type = 'ssh-key' ORDER BY created_at DESC`
+  );
+  res.json(result.rows.map((row: any) => ({ id: row.id, ...row.data, created: row.data?.created || row.created_at })));
+});
+
+app.post('/api/compute/ssh-keys', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const publicKey = String(req.body?.publicKey || '').trim();
+  if (!name || !publicKey) return res.status(400).json({ error: 'Key name and public key are required' });
+  if (!/^(ssh-ed25519|ssh-rsa)\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(publicKey)) return res.status(400).json({ error: 'Invalid OpenSSH public key' });
+  const crypto = await import('crypto');
+  const body = publicKey.split(/\s+/)[1];
+  const fingerprint = `SHA256:${crypto.createHash('sha256').update(Buffer.from(body, 'base64')).digest('base64').replace(/=+$/, '')}`;
+  const key = {
+    name,
+    publicKey,
+    fingerprint,
+    type: publicKey.startsWith('ssh-rsa') ? 'RSA-4096' : 'ED25519',
+    created: new Date().toISOString(),
+    lastUsed: 'Never',
+  };
+  const result = await pool.query(
+    `INSERT INTO resources (type, provider, external_id, data) VALUES ('ssh-key', 'novacloud', $1, $2) RETURNING id`,
+    [`ssh-key:${Date.now()}:${name}`, key],
+  );
+  res.status(201).json({ id: result.rows[0].id, ...key });
+});
+
+app.delete('/api/compute/ssh-keys/:id', requireAuth, async (req, res) => {
+  const result = await pool.query(`DELETE FROM resources WHERE id = $1 AND type = 'ssh-key'`, [req.params.id]);
+  if (!result.rowCount) return res.status(404).json({ error: 'SSH key not found' });
+  res.status(204).end();
 });
 
 app.get('/api/system/summary', requireAuth, async (_req, res) => {
