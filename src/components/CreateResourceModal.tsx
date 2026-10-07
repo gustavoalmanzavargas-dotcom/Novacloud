@@ -79,8 +79,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       category: 'Containers',
       description: 'Run microservices and Docker workloads without managing underlying VM infrastructure.',
       icon: Boxes,
-      view: 'applications',
-      available: false,
+      view: 'containers',
     },
     {
       id: 'res-k8s',
