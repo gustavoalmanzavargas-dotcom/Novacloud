@@ -69,21 +69,19 @@ if [[ -z "${NOVA_UNATTENDED:-}" ]]; then
   read -rp "Optional Gemini API key (press Enter to skip): " GEMINI_API_KEY
 fi
 
-PROXMOX_HOST="${NOVA_PROXMOX_HOST:-}"
-PROXMOX_TOKEN_ID="${NOVA_PROXMOX_TOKEN_ID:-}"
-PROXMOX_TOKEN_SECRET="${NOVA_PROXMOX_TOKEN_SECRET:-}"
-PROXMOX_VERIFY_TLS="${NOVA_PROXMOX_VERIFY_TLS:-true}"
+NOVA_AGENT_URL="${NOVA_AGENT_URL:-}"
+NOVA_AGENT_TOKEN="${NOVA_AGENT_TOKEN:-}"
+NOVA_AGENT_VERIFY_TLS="${NOVA_AGENT_VERIFY_TLS:-true}"
 if [[ -z "${NOVA_UNATTENDED:-}" ]]; then
-  read -rp "Optional Proxmox API URL, e.g. https://10.0.0.10:8006 (press Enter to skip): " PROXMOX_HOST
-  if [[ -n "${PROXMOX_HOST}" ]]; then
-    read -rp "Proxmox API token ID (user@realm!token): " PROXMOX_TOKEN_ID
-    read -rsp "Proxmox API token secret: " PROXMOX_TOKEN_SECRET
+  read -rp "Nova Agent URL (press Enter to configure later): " NOVA_AGENT_URL
+  if [[ -n "${NOVA_AGENT_URL}" ]]; then
+    read -rsp "Nova Agent token: " NOVA_AGENT_TOKEN
     echo
-    read -rp "Verify Proxmox TLS certificate? [Y/n]: " PROXMOX_TLS_ANSWER
-    if [[ "${PROXMOX_TLS_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
-      PROXMOX_VERIFY_TLS="false"
+    read -rp "Verify Nova Agent TLS certificate? [Y/n]: " NOVA_AGENT_TLS_ANSWER
+    if [[ "${NOVA_AGENT_TLS_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
+      NOVA_AGENT_VERIFY_TLS="false"
     else
-      PROXMOX_VERIFY_TLS="true"
+      NOVA_AGENT_VERIFY_TLS="true"
     fi
   fi
 fi
@@ -123,10 +121,9 @@ COOKIE_SECURE=${COOKIE_SECURE}
 DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}
 SESSION_SECRET=${SESSION_SECRET}
 GEMINI_API_KEY=${GEMINI_API_KEY}
-PROXMOX_HOST=${PROXMOX_HOST}
-PROXMOX_TOKEN_ID=${PROXMOX_TOKEN_ID}
-PROXMOX_TOKEN_SECRET=${PROXMOX_TOKEN_SECRET}
-PROXMOX_VERIFY_TLS=${PROXMOX_VERIFY_TLS}
+NOVA_AGENT_URL=${NOVA_AGENT_URL}
+NOVA_AGENT_TOKEN=${NOVA_AGENT_TOKEN}
+NOVA_AGENT_VERIFY_TLS=${NOVA_AGENT_VERIFY_TLS}
 EOF
 chmod 600 "${APP_DIR}/.env"
 
