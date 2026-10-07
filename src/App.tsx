@@ -129,26 +129,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const handleToggleVmStatus = (vmId: string) => {
-    setVms((prev) =>
-      prev.map((vm) => {
-        if (vm.id === vmId) {
-          const nextStatus = vm.status === 'Running' ? 'Stopped' : 'Running';
-          return { ...vm, status: nextStatus };
-        }
-        return vm;
-      })
-    );
-    if (selectedVM && selectedVM.id === vmId) {
-      setSelectedVM((prev) =>
-        prev
-          ? {
-              ...prev,
-              status: prev.status === 'Running' ? 'Stopped' : 'Running',
-            }
-          : null
-      );
+  const handleToggleVmStatus = async (vmId: string) => {
+    const vm = vms.find((item) => item.id === vmId);
+    if (!vm) return;
+    const action = vm.status === 'Running' ? 'shutdown' : 'start';
+    const response = await fetch(`/api/compute/vms/${encodeURIComponent(vmId)}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      window.alert(body?.error || `Unable to ${action} ${vm.name}`);
+      return;
     }
+    setVms((prev) => prev.map((item) =>
+      item.id === vmId
+        ? { ...item, status: action === 'start' ? 'Deploying' : 'Stopped' }
+        : item
+    ));
+    window.setTimeout(() => {
+      loadDashboard().catch(() => undefined);
+    }, 2000);
   };
 
   const handleNavigate = (view: ActiveView, subTab?: string) => {
