@@ -113,6 +113,21 @@ export default function App() {
       .catch(() => setAuthState('anonymous'));
   }, []);
 
+  useEffect(() => {
+    if (authState !== 'authenticated') return;
+    const events = new EventSource('/api/events');
+    const refresh = () => {
+      loadDashboard().catch(() => undefined);
+    };
+    events.addEventListener('resource-sync', refresh);
+    events.addEventListener('job-update', refresh);
+    return () => {
+      events.removeEventListener('resource-sync', refresh);
+      events.removeEventListener('job-update', refresh);
+      events.close();
+    };
+  }, [authState]);
+
   // Keyboard Shortcuts (Ctrl+K, `)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
