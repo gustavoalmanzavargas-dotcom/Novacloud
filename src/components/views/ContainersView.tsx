@@ -31,6 +31,10 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
   const [terminalHistory, setTerminalHistory] = useState<{ command: string; stdout: string; stderr: string; code: number }[]>([]);
   const [terminalBusy, setTerminalBusy] = useState(false);
 
+  const fieldClass = isLight
+    ? 'w-full px-3 py-2 rounded-lg bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-cyan-500'
+    : 'w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500';
+
   const notify = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(''), 4000);
@@ -206,7 +210,7 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
               <th className="px-4 py-3 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/60">
+          <tbody className={isLight ? 'divide-y divide-slate-200 text-slate-800' : 'divide-y divide-slate-800/60 text-slate-200'}>
             {containers.map((container) => (
               <tr key={container.id}>
                 <td className="px-4 py-3">
@@ -233,8 +237,12 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
                     <button onClick={() => openTerminal(container)} disabled={container.status !== 'Running'} className="px-2 py-1 rounded bg-slate-800 text-cyan-300 disabled:opacity-30">
                       <span className="flex items-center gap-1"><Terminal className="w-3.5 h-3.5" /> Terminal</span>
                     </button>
-                    <button onClick={() => remove(container)} className="p-1.5 rounded hover:bg-red-500/10" title="Delete">
-                      <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                    <button
+                      onClick={() => remove(container)}
+                      className={`px-2 py-1 rounded text-[11px] font-semibold flex items-center gap-1 ${isLight ? 'text-red-700 hover:bg-red-50 border border-red-200' : 'text-red-400 hover:bg-red-500/10 border border-red-500/20'}`}
+                      title="Delete container and root filesystem"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Delete
                     </button>
                   </div>
                 </td>
@@ -249,8 +257,8 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
 
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="w-full max-w-xl rounded-xl border border-slate-700 bg-slate-900 text-slate-100 shadow-2xl">
-            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+          <div className={`w-full max-w-xl rounded-xl border shadow-2xl ${isLight ? 'border-slate-300 bg-white text-slate-900' : 'border-slate-700 bg-slate-900 text-slate-100'}`}>
+            <div className={`px-5 py-4 border-b flex items-center justify-between ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>
               <div>
                 <h3 className="font-bold text-sm flex items-center gap-2"><Server className="w-4 h-4 text-cyan-400" /> Create Container</h3>
                 <p className="text-[11px] text-slate-400 mt-1">Nova prepares a real isolated Linux root filesystem before reporting the container as running.</p>
@@ -261,12 +269,12 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
               <div>
                 <label className="block text-[11px] font-semibold text-slate-400 mb-1">Container Name</label>
                 <input required value={form.name} onChange={(e) => setForm((v) => ({ ...v, name: e.target.value }))}
-                  placeholder="e.g. api-service-01" className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700" />
+                  placeholder="e.g. api-service-01" className={fieldClass} />
               </div>
               <div>
                 <label className="block text-[11px] font-semibold text-slate-400 mb-1">Base OS</label>
                 <select value={form.base} onChange={(e) => setForm((v) => ({ ...v, base: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700">
+                  className={fieldClass}>
                   {(options?.bases || []).map((base: any) => <option key={base.id} value={base.id}>{base.name}</option>)}
                 </select>
               </div>
@@ -275,20 +283,20 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">CPU Limit</label>
                   <input type="number" min="1" max="64" value={form.cpuLimit}
                     onChange={(e) => setForm((v) => ({ ...v, cpuLimit: Number(e.target.value) }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700" />
+                    className={fieldClass} />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">Memory (MiB)</label>
                   <input type="number" min="256" step="256" value={form.memoryMb}
                     onChange={(e) => setForm((v) => ({ ...v, memoryMb: Number(e.target.value) }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700" />
+                    className={fieldClass} />
                 </div>
               </div>
-              <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-3 text-[11px] text-slate-400">
+              <div className={`rounded-lg border p-3 text-[11px] ${isLight ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-slate-700 bg-slate-950/60 text-slate-400'}`}>
                 Network: isolated private namespace. Console: terminal. Initial Debian rootfs creation can take a few minutes.
               </div>
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-                <button type="button" onClick={() => setShowCreate(false)} disabled={working} className="px-3 py-2 border border-slate-700 rounded-lg">Cancel</button>
+              <div className={`flex justify-end gap-2 pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>
+                <button type="button" onClick={() => setShowCreate(false)} disabled={working} className={`px-3 py-2 border rounded-lg ${isLight ? 'border-slate-300 text-slate-700 hover:bg-slate-50' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}`}>Cancel</button>
                 <button type="submit" disabled={working} className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold rounded-lg disabled:opacity-50">
                   {working ? 'Creating root filesystem…' : 'Create & Start Container'}
                 </button>
