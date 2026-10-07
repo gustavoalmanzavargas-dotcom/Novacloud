@@ -9,7 +9,8 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
-import { novaAgentConfigured, novaAgentRequest } from './server/novaAgentClient';
+import { spawn } from 'child_process';
+import { novaAgentConfigured, novaAgentRequest, novaAgentUpload } from './server/novaAgentClient';
 
 dotenv.config();
 
@@ -20,6 +21,7 @@ if (!process.env.DATABASE_URL || !process.env.SESSION_SECRET) {
 declare module 'express-session' {
   interface SessionData {
     userId: string;
+    shellCwd?: string;
   }
 }
 
@@ -278,6 +280,76 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (!req.session.userId) return res.status(401).json({ error: 'Authentication required' });
   next();
 }
+async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.session.userId) return res.status(401).json({ error: 'Authentication required' });
+  const result = await pool.query(
+    'SELECT role FROM users WHERE id = $1 AND active = TRUE',
+    [req.session.userId],
+  );
+  if (result.rows[0]?.role !== 'admin') return res.status(403).json({ error: 'Administrator access required' });
+  next();
+}
+
+app.post('/api/shell/exec', requireAdmin, async (req, res) => {
+  const command = String(req.body?.command || '').trim();
+  if (!command) return res.status(400).json({ error: 'Command is required' });
+  if (command.length > 4096) return res.status(400).json({ error: 'Command is too long' });
+
+  const currentCwd = req.session.shellCwd || process.cwd();
+  if (/^cd(?:\s|$)/.test(command)) {
+    const targetText = command.replace(/^cd\s*/, '').trim();
+    const target = targetText
+      ? path.resolve(currentCwd, targetText.replace(/^~(?=\/|$)/, process.env.HOME || '/opt/novacloud'))
+      : (process.env.HOME || '/opt/novacloud');
+    try {
+      if (!fs.statSync(target).isDirectory()) return res.status(400).json({ error: 'Target is not a directory' });
+      req.session.shellCwd = target;
+      return res.json({ stdout: '', stderr: '', code: 0, cwd: target });
+    } catch {
+      return res.status(400).json({ error: `Directory not found: ${targetText || '~'}` });
+    }
+  }
+
+  const child = spawn('/bin/bash', ['-lc', command], {
+    cwd: currentCwd,
+    env: {
+      ...process.env,
+      TERM: 'xterm-256color',
+      NOVA_SHELL: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  let killedForLimit = false;
+  const outputLimit = 1024 * 1024;
+  const append = (which: 'stdout' | 'stderr', chunk: Buffer) => {
+    const textChunk = chunk.toString('utf8');
+    if (which === 'stdout') stdout += textChunk;
+    else stderr += textChunk;
+    if (stdout.length + stderr.length > outputLimit && !killedForLimit) {
+      killedForLimit = true;
+      child.kill('SIGKILL');
+    }
+  };
+  child.stdout.on('data', (chunk) => append('stdout', chunk));
+  child.stderr.on('data', (chunk) => append('stderr', chunk));
+
+  const timer = setTimeout(() => child.kill('SIGKILL'), 30000);
+  child.on('error', (error) => {
+    clearTimeout(timer);
+    if (!res.headersSent) res.status(500).json({ error: error.message });
+  });
+  child.on('close', (code, signal) => {
+    clearTimeout(timer);
+    if (res.headersSent) return;
+    if (killedForLimit) stderr += '\nNova Shell stopped the command because output exceeded 1 MiB.\n';
+    if (signal === 'SIGKILL' && !killedForLimit) stderr += '\nNova Shell stopped the command after 30 seconds.\n';
+    res.json({ stdout, stderr, code: code ?? 137, cwd: currentCwd });
+  });
+});
+
 
 app.get('/api/events', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -690,6 +762,28 @@ app.get('/api/compute/images', requireAuth, async (_req, res) => {
     })));
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read Nova images' });
+  }
+});
+
+app.post('/api/compute/images/upload', requireAuth, async (req, res) => {
+  const filename = String(req.headers['x-nova-filename'] || '').trim();
+  if (!/^[A-Za-z0-9._-]{1,160}$/.test(filename)) {
+    return res.status(400).json({ error: 'A valid image filename is required' });
+  }
+  const lengthHeader = Number(req.headers['content-length'] || 0);
+  const jobId = await createJob('image.upload', req.session.userId, 'image', filename, {
+    filename,
+    sizeBytes: Number.isFinite(lengthHeader) ? lengthHeader : 0,
+  });
+  try {
+    const image = await novaAgentUpload(filename, req, Number.isFinite(lengthHeader) ? lengthHeader : undefined);
+    await finishJob(jobId, 'succeeded', image);
+    await syncNovaAgentInventory();
+    res.status(201).json({ success: true, jobId, ...image });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Image upload failed';
+    await finishJob(jobId, 'failed', {}, message);
+    if (!res.headersSent) res.status(502).json({ error: message, jobId });
   }
 });
 
