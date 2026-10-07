@@ -38,6 +38,21 @@ type NovaApplication = {
   updatedAt: string;
 };
 
+type NovaContainer = {
+  id: string;
+  name: string;
+  base: 'debian-13';
+  rootfs: string;
+  machine: string;
+  unit: string;
+  cpuLimit: number;
+  memoryMb: number;
+  networkMode: 'private';
+  status: 'Running' | 'Stopped' | 'Failed' | 'Creating';
+  createdAt: string;
+  updatedAt: string;
+};
+
 type NovaVolume = {
   id: string;
   name: string;
@@ -88,10 +103,12 @@ const networksDir = path.join(stateDir, 'networks');
 const volumesDir = path.join(stateDir, 'volumes');
 const appsDir = path.join(stateDir, 'apps');
 const appSourcesDir = path.join(stateDir, 'app-sources');
+const containersDir = path.join(stateDir, 'containers');
+const containerRootsDir = path.join(stateDir, 'container-roots');
 const runDir = process.env.NOVA_AGENT_RUN_DIR || '/run/novacloud-agent';
 const defaultBridge = process.env.NOVA_AGENT_BRIDGE || 'novabr0';
 
-for (const dir of [stateDir, instancesDir, imagesDir, disksDir, networksDir, volumesDir, appsDir, appSourcesDir, runDir]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [stateDir, instancesDir, imagesDir, disksDir, networksDir, volumesDir, appsDir, appSourcesDir, containersDir, containerRootsDir, runDir]) fs.mkdirSync(dir, { recursive: true });
 
 function requireToken(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!token || req.headers.authorization !== `Bearer ${token}`) {
@@ -402,6 +419,8 @@ function hostFacts() {
       nftables: commandExists('nft'),
       iproute2: commandExists('ip'),
       bridge: defaultBridge,
+      containers: commandExists('systemd-nspawn') && commandExists('debootstrap') && commandExists('nsenter'),
+      containerRuntime: commandExists('systemd-nspawn') ? 'systemd-nspawn' : 'none',
     },
     interfaces,
     timestamp: new Date().toISOString(),
@@ -553,6 +572,175 @@ app.delete('/v1/instances/:id', (req, res) => {
     res.status(204).end();
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Instance deletion failed' });
+  }
+});
+
+function containerFile(id: string) {
+  return jsonFile(containersDir, id);
+}
+
+function containerState(container: NovaContainer): NovaContainer {
+  const active = spawnSync('systemctl', ['is-active', '--quiet', container.unit], { stdio: 'ignore' }).status === 0;
+  return { ...container, status: active ? 'Running' : (container.status === 'Failed' ? 'Failed' : 'Stopped') };
+}
+
+function startContainer(container: NovaContainer) {
+  if (!commandExists('systemd-nspawn')) throw new Error('systemd-nspawn is not installed on this Nova host');
+  if (spawnSync('systemctl', ['is-active', '--quiet', container.unit], { stdio: 'ignore' }).status === 0) {
+    return containerState(container);
+  }
+  const result = spawnSync('systemd-run', [
+    '--unit', container.unit.replace(/\.service$/, ''),
+    '--property', 'Delegate=yes',
+    '--property', `MemoryMax=${container.memoryMb}M`,
+    '--property', `CPUQuota=${Math.max(1, container.cpuLimit) * 100}%`,
+    '--collect',
+    'systemd-nspawn',
+    '--quiet',
+    '--machine', container.machine,
+    '--directory', container.rootfs,
+    '--private-network',
+    '--boot',
+    '--register=yes',
+  ], { encoding: 'utf8', timeout: 30000 });
+
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error((result.stderr || result.stdout || 'Container start failed').trim());
+  spawnSync('sleep', ['1']);
+  if (spawnSync('systemctl', ['is-active', '--quiet', container.unit], { stdio: 'ignore' }).status !== 0) {
+    container.status = 'Failed';
+    container.updatedAt = new Date().toISOString();
+    saveJson(containerFile(container.id), container);
+    const log = spawnSync('journalctl', ['-u', container.unit, '-n', '40', '--no-pager', '-o', 'cat'], { encoding: 'utf8' });
+    throw new Error((log.stdout || log.stderr || 'Container process exited during startup').trim());
+  }
+  container.status = 'Running';
+  container.updatedAt = new Date().toISOString();
+  saveJson(containerFile(container.id), container);
+  return containerState(container);
+}
+
+function stopContainer(container: NovaContainer) {
+  spawnSync('machinectl', ['poweroff', container.machine], { stdio: 'ignore', timeout: 15000 });
+  spawnSync('systemctl', ['stop', container.unit], { stdio: 'ignore', timeout: 15000 });
+  container.status = 'Stopped';
+  container.updatedAt = new Date().toISOString();
+  saveJson(containerFile(container.id), container);
+  return containerState(container);
+}
+
+app.get('/v1/containers', (_req, res) => {
+  res.json(listJson<NovaContainer>(containersDir).map(containerState));
+});
+
+app.post('/v1/containers', (req, res) => {
+  const id = crypto.randomUUID();
+  let rootfs = '';
+  try {
+    const name = String(req.body?.name || '').trim();
+    const cpuLimit = Number(req.body?.cpuLimit || 1);
+    const memoryMb = Number(req.body?.memoryMb || 1024);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid container name is required' });
+    if (!Number.isInteger(cpuLimit) || cpuLimit < 1 || cpuLimit > 64) return res.status(400).json({ error: 'Container CPU limit must be between 1 and 64' });
+    if (!Number.isInteger(memoryMb) || memoryMb < 256 || memoryMb > 262144) return res.status(400).json({ error: 'Container memory must be between 256 and 262144 MiB' });
+    if (!commandExists('systemd-nspawn') || !commandExists('debootstrap')) {
+      return res.status(409).json({ error: 'Nova container runtime dependencies are not installed on this host' });
+    }
+    if (listJson<NovaContainer>(containersDir).some((item) => item.name === name)) {
+      return res.status(409).json({ error: 'A container with that name already exists' });
+    }
+
+    rootfs = path.join(containerRootsDir, id);
+    fs.mkdirSync(rootfs, { recursive: true });
+    const bootstrap = spawnSync('debootstrap', [
+      '--variant=minbase',
+      '--include=systemd-sysv,ca-certificates,iproute2,procps,bash',
+      'trixie',
+      rootfs,
+      'http://deb.debian.org/debian',
+    ], { encoding: 'utf8', timeout: 300000 });
+    if (bootstrap.error) throw bootstrap.error;
+    if (bootstrap.status !== 0) throw new Error((bootstrap.stderr || bootstrap.stdout || 'Container base image creation failed').trim());
+
+    fs.writeFileSync(path.join(rootfs, 'etc', 'hostname'), `${name}\n`);
+    try { fs.copyFileSync('/etc/resolv.conf', path.join(rootfs, 'etc', 'resolv.conf')); } catch {}
+
+    const container: NovaContainer = {
+      id,
+      name,
+      base: 'debian-13',
+      rootfs,
+      machine: `nova-${id.replace(/-/g, '').slice(0, 16)}`,
+      unit: `nova-ct-${id.replace(/-/g, '').slice(0, 16)}.service`,
+      cpuLimit,
+      memoryMb,
+      networkMode: 'private',
+      status: 'Stopped',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    saveJson(containerFile(id), container);
+    const shouldStart = req.body?.start !== false;
+    res.status(201).json(shouldStart ? startContainer(container) : containerState(container));
+  } catch (error) {
+    if (rootfs && !fs.existsSync(containerFile(id))) {
+      try { fs.rmSync(rootfs, { recursive: true, force: true }); } catch {}
+    }
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Container creation failed' });
+  }
+});
+
+app.post('/v1/containers/:id/action', (req, res) => {
+  try {
+    const container = readJson<NovaContainer>(containerFile(req.params.id));
+    const action = String(req.body?.action || '');
+    if (action === 'start') return res.json(startContainer(container));
+    if (action === 'stop' || action === 'shutdown') return res.json(stopContainer(container));
+    if (action === 'restart') {
+      stopContainer(container);
+      return res.json(startContainer(container));
+    }
+    return res.status(400).json({ error: 'Unsupported container action' });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Container action failed' });
+  }
+});
+
+app.post('/v1/containers/:id/exec', (req, res) => {
+  try {
+    const container = readJson<NovaContainer>(containerFile(req.params.id));
+    const state = containerState(container);
+    if (state.status !== 'Running') return res.status(409).json({ error: 'Start the container before opening its terminal' });
+    const command = String(req.body?.command || '').trim();
+    if (!command) return res.status(400).json({ error: 'Command is required' });
+    if (command.length > 4096) return res.status(400).json({ error: 'Command is too long' });
+
+    const leader = run('machinectl', ['show', container.machine, '--property=Leader', '--value']);
+    if (!/^\d+$/.test(leader)) throw new Error('Unable to resolve the container process namespace');
+    const result = spawnSync('nsenter', [
+      '-t', leader, '-m', '-u', '-i', '-n', '-p', '--',
+      '/bin/bash', '-lc', command,
+    ], { encoding: 'utf8', timeout: 30000 });
+    if (result.error) throw result.error;
+    res.json({
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+      code: result.status ?? 1,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Container command failed' });
+  }
+});
+
+app.delete('/v1/containers/:id', (req, res) => {
+  try {
+    const container = readJson<NovaContainer>(containerFile(req.params.id));
+    stopContainer(container);
+    fs.rmSync(container.rootfs, { recursive: true, force: true });
+    fs.unlinkSync(containerFile(container.id));
+    res.status(204).end();
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Container deletion failed' });
   }
 });
 
