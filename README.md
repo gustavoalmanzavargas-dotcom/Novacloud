@@ -6,7 +6,7 @@ Cyverax Nova is a self-hosted cloud platform with its own control plane, resourc
 
 ## Architecture
 
-NovaCloud is **not a Proxmox, VMware, Hyper-V, or public-cloud frontend**. The Nova UI communicates only with the Nova control API.
+NovaCloud is its own cloud control plane. The Nova UI communicates only with the Nova control API.
 
 ```text
 NovaCloud UI
