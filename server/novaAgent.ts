@@ -66,6 +66,10 @@ type InstanceState = {
   qmpSocket: string;
   networkMode: 'bridge' | 'user';
   acceleration: 'kvm' | 'tcg';
+  bootMode: 'image' | 'blank';
+  imageId?: string;
+  vncDisplay: number;
+  vncPort: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -242,6 +246,22 @@ function canUseTapBridge(bridge: string) {
   return true;
 }
 
+function nextVncDisplay() {
+  const used = new Set(listInstances().map((item) => Number(item.vncDisplay || 0)).filter(Boolean));
+  for (let display = 1; display <= 99; display += 1) {
+    if (!used.has(display)) return display;
+  }
+  throw new Error('No Nova VNC console displays are available');
+}
+
+function writeNoVncTokens() {
+  const tokenFile = path.join(stateDir, 'novnc.tokens');
+  const lines = listInstances()
+    .filter((item) => Number(item.vncPort || 0) > 0)
+    .map((item) => `${item.id}: 127.0.0.1:${item.vncPort}`);
+  fs.writeFileSync(tokenFile, lines.length ? lines.join('\n') + '\n' : '', { mode: 0o600 });
+}
+
 function startInstance(instance: InstanceState) {
   if (pidFor(instance)) return currentState(instance);
   if (!commandExists('qemu-system-x86_64')) throw new Error('QEMU is not installed on this Nova host');
@@ -266,6 +286,11 @@ function startInstance(instance: InstanceState) {
     '-display', 'none',
     '-serial', 'none',
     '-nodefaults',
+    '-device', 'virtio-vga',
+    '-device', 'qemu-xhci',
+    '-device', 'usb-kbd',
+    '-device', 'usb-tablet',
+    '-vnc', `127.0.0.1:${instance.vncDisplay}`,
     '-no-reboot',
   ];
 
@@ -292,10 +317,22 @@ function startInstance(instance: InstanceState) {
     throw error;
   }
 
+  spawnSync('sleep', ['0.25']);
+  const startedPid = pidFor(instance);
+  if (!startedPid) {
+    instance.status = 'Failed';
+    instance.networkMode = networkMode;
+    instance.acceleration = acceleration;
+    saveInstance(instance);
+    if (useBridge) destroyTap(instance);
+    throw new Error('QEMU exited before the VM reached running state. Check the selected boot image and VM configuration.');
+  }
+
   instance.status = 'Running';
   instance.networkMode = networkMode;
   instance.acceleration = acceleration;
   saveInstance(instance);
+  writeNoVncTokens();
   return currentState(instance);
 }
 
@@ -408,6 +445,7 @@ app.post('/v1/instances', (req, res) => {
     const diskGb = Number(req.body?.diskGb || 32);
     const bridge = String(req.body?.bridge || defaultBridge).trim();
     const imageId = String(req.body?.imageId || '').trim();
+    const bootMode = String(req.body?.bootMode || 'image') === 'blank' ? 'blank' : 'image';
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid instance name is required' });
     if (!Number.isInteger(vcpu) || vcpu < 1 || vcpu > 256 || memoryMb < 512 || diskGb < 4) {
       return res.status(400).json({ error: 'Instance resources are outside allowed limits' });
@@ -415,10 +453,16 @@ app.post('/v1/instances', (req, res) => {
     if (!/^[A-Za-z0-9_.:-]{1,32}$/.test(bridge)) return res.status(400).json({ error: 'Invalid bridge name' });
     const resolvedBridge = spawnSync('ip', ['link', 'show', bridge], { stdio: 'ignore' }).status === 0 ? bridge : 'user';
 
+    if (bootMode === 'image' && !imageId) {
+      return res.status(400).json({ error: 'Select a Nova image before creating this VM' });
+    }
+
     const id = crypto.randomUUID();
     const diskPath = path.join(disksDir, `${id}.qcow2`);
     const imagePath = imageId ? path.join(imagesDir, safeFilename(imageId)) : undefined;
     if (imagePath && !fs.existsSync(imagePath)) return res.status(400).json({ error: 'Selected image does not exist on this Nova host' });
+    const vncDisplay = nextVncDisplay();
+    const vncPort = 5900 + vncDisplay;
 
     if (imagePath && /\.qcow2$/i.test(imagePath)) {
       run('qemu-img', ['create', '-f', 'qcow2', '-F', 'qcow2', '-b', imagePath, diskPath, `${diskGb}G`]);
@@ -435,6 +479,10 @@ app.post('/v1/instances', (req, res) => {
       diskGb,
       diskPath,
       imagePath,
+      imageId: imageId || undefined,
+      bootMode,
+      vncDisplay,
+      vncPort,
       bridge: resolvedBridge,
       tap: `nv${id.replace(/-/g, '').slice(0, 10)}`,
       mac: '52:54:00:' + crypto.randomBytes(3).toString('hex').match(/.{2}/g)!.join(':'),
@@ -446,10 +494,29 @@ app.post('/v1/instances', (req, res) => {
       updatedAt: new Date().toISOString(),
     };
     saveInstance(instance);
-    const shouldStart = req.body?.start !== false;
-    res.status(201).json(shouldStart ? startInstance(instance) : instance);
+    writeNoVncTokens();
+    const shouldStart = bootMode === 'image' && req.body?.start !== false;
+    res.status(201).json(shouldStart ? startInstance(instance) : currentState(instance));
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Instance creation failed' });
+  }
+});
+
+app.get('/v1/instances/:id/console', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (!instance.vncPort) return res.status(409).json({ error: 'This VM does not have a graphical console configured' });
+    res.json({
+      id: instance.id,
+      name: instance.name,
+      type: 'vnc',
+      token: instance.id,
+      display: instance.vncDisplay,
+      port: instance.vncPort,
+      running: Boolean(pidFor(instance)),
+    });
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : 'VM not found' });
   }
 });
 
