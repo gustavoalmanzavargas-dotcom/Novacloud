@@ -437,19 +437,16 @@ export const TopNav: React.FC<TopNavProps> = ({
           )}
         </button>
 
-        {/* Theme Workspace Toggle */}
-        <button
-          id="theme-mode-toggle-btn"
-          onClick={handleToggleTheme}
-          className={`p-1.5 rounded border transition-colors cursor-pointer hidden sm:block ${
-            isLight
-              ? 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 border-transparent hover:border-slate-200'
-              : 'text-slate-400 hover:text-white hover:bg-slate-900 border-transparent hover:border-slate-800'
+        {/* System appearance indicator */}
+        <div
+          id="theme-mode-system-indicator"
+          className={`p-1.5 rounded border hidden sm:block ${
+            isLight ? 'text-slate-600 border-transparent' : 'text-slate-400 border-transparent'
           }`}
-          title={themeMode === 'dark' ? 'Switch to Light Workspace' : 'Switch to Full Dark Console'}
+          title={`Following system appearance: ${themeMode}`}
         >
-          {themeMode === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-cyan-600" />}
-        </button>
+          {themeMode === 'dark' ? <Moon className="w-4 h-4 text-cyan-400" /> : <Sun className="w-4 h-4 text-amber-500" />}
+        </div>
 
         {/* Documentation / Help */}
         <button
