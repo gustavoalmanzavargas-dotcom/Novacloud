@@ -378,8 +378,14 @@ async function getNovaClusterSummary() {
   return {
     clusterName: 'NovaCloud',
     location: 'Local',
-    hypervisor: 'Nova Native KVM/QEMU',
-    networkFabric: networks.rows.length ? 'Nova Linux Bridge/NAT' : 'Not configured',
+    hypervisor: normalizedHosts.some((host: any) => host.capabilities?.acceleration === 'kvm')
+      ? 'Nova Native KVM/QEMU'
+      : normalizedHosts.some((host: any) => host.capabilities?.acceleration === 'tcg')
+        ? 'Nova Native QEMU/TCG'
+        : 'Nova Compute Not Ready',
+    networkFabric: networks.rows.length
+      ? (networks.rows.some((row: any) => row.data?.mode === 'bridge') ? 'Nova Linux Bridge/NAT' : 'Nova QEMU User NAT')
+      : 'Not configured',
     status: onlineNodes > 0 ? 'Healthy' : 'Degraded',
     totalNodes: normalizedHosts.length,
     onlineNodes,
@@ -450,8 +456,8 @@ app.post('/api/clients', requireAuth, async (req, res) => {
   } catch (error) {
     return res.status(503).json({ error: error instanceof Error ? error.message : 'Nova compute host is unavailable' });
   }
-  if (!host?.capabilities?.kvm || !host?.capabilities?.qemu) {
-    return res.status(409).json({ error: 'Connected Nova host is not compute-ready: KVM/QEMU capability is required.' });
+  if (!host?.capabilities?.qemu) {
+    return res.status(409).json({ error: 'Connected Nova host is not compute-ready: QEMU is required.' });
   }
 
   const count = await pool.query(`SELECT COUNT(*)::int AS count FROM resources WHERE type = 'tenant' AND provider = 'nova-native'`);
