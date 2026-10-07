@@ -513,7 +513,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 } else {
                   setStorageOpen(!storageOpen);
                 }
-                onNavigate('storage', 'buckets');
+                onNavigate('storage', 'drives');
               }}
               className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${getItemClass(
                 activeView === 'storage'
@@ -527,7 +527,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               {!collapsedState && (
                 <div className="flex items-center gap-1.5">
                   <span className={`text-[10px] font-mono ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
-                    4.8TB
+                    LIVE
                   </span>
                   {storageOpen ? (
                     <ChevronDown className="w-3 h-3 text-slate-400" />
@@ -545,6 +545,15 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 }`}
               >
                 <button
+                  id="nav-sub-drives-btn"
+                  onClick={() => onNavigate('storage', 'drives')}
+                  className={`w-full text-left px-2 py-1 text-[11px] rounded transition-colors cursor-pointer ${getSubItemClass(
+                    activeView === 'storage' && (!activeSubTab || activeSubTab === 'drives')
+                  )}`}
+                >
+                  Physical Drives
+                </button>
+                <button
                   id="nav-sub-buckets-btn"
                   onClick={() => onNavigate('storage', 'buckets')}
                   className={`w-full text-left px-2 py-1 text-[11px] rounded transition-colors cursor-pointer ${getSubItemClass(
@@ -560,7 +569,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'storage' && activeSubTab === 'volumes'
                   )}`}
                 >
-                  Block Volumes (NVMe)
+                  Block Volumes
                 </button>
                 <button
                   id="nav-sub-archives-btn"
