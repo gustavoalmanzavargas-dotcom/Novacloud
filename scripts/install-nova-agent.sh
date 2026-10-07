@@ -14,6 +14,7 @@ BRIDGE="${NOVA_AGENT_BRIDGE:-novabr0}"
 BRIDGE_ADDR="${NOVA_AGENT_BRIDGE_ADDRESS:-10.88.0.1/24}"
 UPLINK="${NOVA_AGENT_UPLINK:-$(ip route | awk '/default/ {print $5; exit}')}"
 TOKEN="${NOVA_AGENT_TOKEN:-$(openssl rand -hex 32)}"
+AGENT_BIND="${NOVA_AGENT_BIND:-0.0.0.0}"
 
 echo "Installing Nova Agent host dependencies..."
 apt-get update
@@ -65,7 +66,7 @@ fi
 
 cat >/etc/novacloud-agent.env <<EOF
 NOVA_AGENT_PORT=9443
-NOVA_AGENT_BIND=0.0.0.0
+NOVA_AGENT_BIND=${AGENT_BIND}
 NOVA_AGENT_TOKEN=${TOKEN}
 NOVA_AGENT_STATE_DIR=${STATE_DIR}
 NOVA_AGENT_BRIDGE=${BRIDGE}
