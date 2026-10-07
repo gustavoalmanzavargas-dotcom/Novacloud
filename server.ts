@@ -295,6 +295,84 @@ app.post('/api/providers/proxmox/sync', requireAuth, async (_req, res) => {
   }
 });
 
+app.get('/api/compute/options', requireAuth, async (_req, res) => {
+  if (!proxmoxConfigured()) return res.json({ configured: false, nodes: [], storages: [], bridges: [], nextId: null });
+  try {
+    const [nodes, nextId] = await Promise.all([
+      proxmoxGet('/api2/json/nodes'),
+      proxmoxGet('/api2/json/cluster/nextid'),
+    ]);
+    const nodeNames = (Array.isArray(nodes) ? nodes : []).map((item: any) => String(item.node || '')).filter(Boolean);
+    const storages: any[] = [];
+    const bridges = new Set<string>();
+    for (const node of nodeNames) {
+      const [nodeStorages, network] = await Promise.all([
+        proxmoxGet(`/api2/json/nodes/${encodeURIComponent(node)}/storage`),
+        proxmoxGet(`/api2/json/nodes/${encodeURIComponent(node)}/network`),
+      ]);
+      for (const storage of Array.isArray(nodeStorages) ? nodeStorages : []) {
+        const content = String(storage.content || '');
+        if (Number(storage.active ?? 1) === 1 && (content.includes('images') || content.includes('rootdir'))) {
+          storages.push({ node, storage: storage.storage, content, type: storage.type });
+        }
+      }
+      for (const nic of Array.isArray(network) ? network : []) {
+        if (nic.type === 'bridge' && nic.iface) bridges.add(String(nic.iface));
+      }
+    }
+    res.json({ configured: true, nodes: nodeNames, storages, bridges: Array.from(bridges), nextId: Number(nextId) || null });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Proxmox creation options' });
+  }
+});
+
+app.post('/api/compute/vms', requireAuth, async (req, res) => {
+  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
+  const name = String(req.body?.name || '').trim();
+  const node = String(req.body?.node || '').trim();
+  const storage = String(req.body?.storage || '').trim();
+  const bridge = String(req.body?.bridge || 'vmbr0').trim();
+  const iso = String(req.body?.iso || '').trim();
+  const osType = String(req.body?.osType || 'l26').trim();
+  const vmid = Number(req.body?.vmid || await proxmoxGet('/api2/json/cluster/nextid'));
+  const cores = Number(req.body?.cores || 2);
+  const memoryMb = Number(req.body?.memoryMb || 4096);
+  const diskGb = Number(req.body?.diskGb || 32);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid VM name is required' });
+  if (!node || !storage || !bridge || !Number.isInteger(vmid)) return res.status(400).json({ error: 'Node, storage, bridge, and VM ID are required' });
+  if (cores < 1 || cores > 256 || memoryMb < 512 || diskGb < 4) return res.status(400).json({ error: 'VM resources are outside allowed limits' });
+
+  try {
+    const payload: Record<string, string | number | boolean> = {
+      vmid,
+      name,
+      cores,
+      memory: memoryMb,
+      ostype: osType,
+      scsihw: 'virtio-scsi-single',
+      scsi0: `${storage}:${diskGb},iothread=1`,
+      net0: `virtio,bridge=${bridge}`,
+      boot: iso ? 'order=ide2;scsi0' : 'order=scsi0',
+      agent: 1,
+      onboot: 1,
+    };
+    if (iso) payload.ide2 = `${iso},media=cdrom`;
+    const task = await proxmoxRequest(
+      `/api2/json/nodes/${encodeURIComponent(node)}/qemu`,
+      'POST',
+      payload
+    );
+    await pool.query(
+      `INSERT INTO activity_events (actor, action, resource, status) VALUES ($1, 'compute.create', $2, 'Submitted')`,
+      [String((req as any).session?.userId || 'user'), `qemu:${vmid}`],
+    ).catch(() => undefined);
+    lastProxmoxSyncAt = 0;
+    res.status(202).json({ success: true, task, vmid, name, node });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'VM creation failed' });
+  }
+});
+
 app.get('/api/compute/images', requireAuth, async (_req, res) => {
   if (!proxmoxConfigured()) return res.json([]);
   try {
@@ -462,6 +540,32 @@ app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
     res.status(202).json({ success: true, task, action });
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : `VM ${action} failed` });
+  }
+});
+
+app.post('/api/compute/snapshots/rollback', requireAuth, async (req, res) => {
+  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
+  const snapshotId = String(req.body?.id || '');
+  const parts = snapshotId.split(':');
+  if (parts.length < 3) return res.status(400).json({ error: 'Invalid snapshot identifier' });
+  const kind = parts[0];
+  const vmid = parts[1];
+  const snapname = parts.slice(2).join(':');
+  if (!['qemu', 'lxc'].includes(kind) || !/^\d+$/.test(vmid)) return res.status(400).json({ error: 'Invalid snapshot identifier' });
+  const row = await pool.query(
+    `SELECT data FROM resources WHERE provider = 'proxmox' AND type = 'vm' AND data->'tags'->>'vmid' = $1 AND data->'tags'->>'kind' = $2 LIMIT 1`,
+    [vmid, kind],
+  );
+  if (!row.rows[0]) return res.status(404).json({ error: 'Snapshot source VM was not found' });
+  const node = String(row.rows[0].data?.tags?.node || '');
+  try {
+    const task = await proxmoxRequest(
+      `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/snapshot/${encodeURIComponent(snapname)}/rollback`,
+      'POST'
+    );
+    res.status(202).json({ success: true, task });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Snapshot rollback failed' });
   }
 });
 
