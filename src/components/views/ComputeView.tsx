@@ -138,6 +138,13 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
   const imageFileInputRef = useRef<HTMLInputElement>(null);
   const isLight = themeMode === 'light';
 
+  const fieldClass = isLight
+    ? 'w-full px-3 py-2 rounded-lg bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-cyan-500'
+    : 'w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500';
+  const panelClass = isLight
+    ? 'border-slate-200 bg-slate-50 text-slate-700'
+    : 'border-slate-700 bg-slate-950 text-slate-300';
+
   const readError = async (response: Response, fallback: string) => {
     const body = await response.json().catch(() => ({}));
     return body?.error || fallback;
@@ -205,6 +212,27 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       setSelectedIds([]);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Bulk shutdown failed');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleDeleteVm = async (vm: VMInstance) => {
+    if (isWorking) return;
+    if (!window.confirm(`Delete VM "${vm.name}" and its Nova root disk? This cannot be undone.`)) return;
+    setIsWorking(true);
+    try {
+      const response = await fetch(`/api/compute/vms/${encodeURIComponent(vm.id)}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete' }),
+      });
+      if (!response.ok) throw new Error(await readError(response, 'VM deletion failed'));
+      setSelectedIds((current) => current.filter((id) => id !== vm.id));
+      showToast(`VM "${vm.name}" deleted.`);
+      window.setTimeout(() => window.location.reload(), 500);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'VM deletion failed');
     } finally {
       setIsWorking(false);
     }
@@ -804,7 +832,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                   className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 rounded-md transition-colors cursor-pointer"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>Terminate</span>
+                  <span>Shutdown</span>
                 </button>
               </div>
             )}
@@ -932,6 +960,14 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                               title={vm.status === 'Running' ? 'Open graphical noVNC console' : 'Start VM to open console'}
                             >
                               Console
+                            </button>
+                            <button
+                              onClick={() => handleDeleteVm(vm)}
+                              disabled={isWorking}
+                              className={`p-1.5 rounded transition-colors disabled:opacity-40 ${isLight ? 'text-red-600 hover:bg-red-50' : 'text-red-400 hover:bg-red-500/10'}`}
+                              title="Delete VM and root disk"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                             <button
                               onClick={() => onSelectVM(vm)}
@@ -1294,7 +1330,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       {showVmWizard && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
           <div className={`w-full max-w-2xl rounded-xl border shadow-2xl overflow-hidden ${isLight ? 'bg-white border-slate-300 text-slate-900' : 'bg-slate-900 border-slate-700 text-slate-100'}`}>
-            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+            <div className={`px-5 py-4 border-b flex items-center justify-between ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>
               <div>
                 <h3 className="text-sm font-bold flex items-center gap-2">
                   <Server className="w-4 h-4 text-cyan-400" />
@@ -1302,7 +1338,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 </h3>
                 <p className="text-[11px] text-slate-400 mt-1">Configure the VM before Nova creates anything.</p>
               </div>
-              <button onClick={() => !isWorking && setShowVmWizard(false)} className="text-slate-400 hover:text-white cursor-pointer">
+              <button onClick={() => !isWorking && setShowVmWizard(false)} className={`cursor-pointer ${isLight ? 'text-slate-500 hover:text-slate-900' : 'text-slate-400 hover:text-white'}`}>
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1315,7 +1351,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                     value={vmForm.name}
                     onChange={(e) => setVmForm((v) => ({ ...v, name: e.target.value }))}
                     placeholder="e.g. debian-web-01"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                    className={fieldClass}
                     required
                   />
                 </div>
@@ -1324,7 +1360,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                   <select
                     value={vmForm.node}
                     onChange={(e) => setVmForm((v) => ({ ...v, node: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                    className={fieldClass}
                   >
                     {(computeOptions?.nodes || []).map((node: string) => <option key={node} value={node}>{node}</option>)}
                   </select>
@@ -1340,7 +1376,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setVmForm((v) => ({ ...v, bootMode: 'image' }))}
-                    className={`p-3 rounded-lg border text-left ${vmForm.bootMode === 'image' ? 'border-cyan-500 bg-cyan-500/10 text-cyan-300' : 'border-slate-700 bg-slate-950 text-slate-400'}`}
+                    className={`p-3 rounded-lg border text-left ${vmForm.bootMode === 'image' ? (isLight ? 'border-cyan-500 bg-cyan-50 text-cyan-800' : 'border-cyan-500 bg-cyan-500/10 text-cyan-300') : (isLight ? 'border-slate-300 bg-white text-slate-600' : 'border-slate-700 bg-slate-950 text-slate-400')}`}
                   >
                     <div className="font-semibold">Nova Image Storage</div>
                     <div className="text-[10px] mt-1">Install/boot from an ISO or QCOW2 already imported into Nova.</div>
@@ -1348,7 +1384,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setVmForm((v) => ({ ...v, bootMode: 'blank', imageId: '' }))}
-                    className={`p-3 rounded-lg border text-left ${vmForm.bootMode === 'blank' ? 'border-amber-500 bg-amber-500/10 text-amber-300' : 'border-slate-700 bg-slate-950 text-slate-400'}`}
+                    className={`p-3 rounded-lg border text-left ${vmForm.bootMode === 'blank' ? (isLight ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-amber-500 bg-amber-500/10 text-amber-300') : (isLight ? 'border-slate-300 bg-white text-slate-600' : 'border-slate-700 bg-slate-950 text-slate-400')}`}
                   >
                     <div className="font-semibold">Empty Disk</div>
                     <div className="text-[10px] mt-1">Creates a stopped VM with no operating system. Nova will not call it running.</div>
@@ -1362,7 +1398,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                       <select
                         value={vmForm.imageId}
                         onChange={(e) => setVmForm((v) => ({ ...v, imageId: e.target.value }))}
-                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                        className={fieldClass}
                         required
                       >
                         <option value="">Select an image…</option>
@@ -1386,19 +1422,19 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">vCPU</label>
                   <input type="number" min="1" max="256" value={vmForm.cores}
                     onChange={(e) => setVmForm((v) => ({ ...v, cores: Number(e.target.value) }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100" />
+                    className={fieldClass} />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">Memory (MiB)</label>
                   <input type="number" min="512" step="512" value={vmForm.memoryMb}
                     onChange={(e) => setVmForm((v) => ({ ...v, memoryMb: Number(e.target.value) }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100" />
+                    className={fieldClass} />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">Disk (GiB)</label>
                   <input type="number" min="4" value={vmForm.diskGb}
                     onChange={(e) => setVmForm((v) => ({ ...v, diskGb: Number(e.target.value) }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100" />
+                    className={fieldClass} />
                 </div>
               </div>
 
@@ -1406,7 +1442,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">Disk Storage</label>
                   <select value={vmForm.storage} onChange={(e) => setVmForm((v) => ({ ...v, storage: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100">
+                    className={fieldClass}>
                     {(computeOptions?.storages || []).map((storage: any) => (
                       <option key={storage.storage} value={storage.storage}>{storage.storage} ({storage.type})</option>
                     ))}
@@ -1415,19 +1451,19 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-400 mb-1">Network</label>
                   <select value={vmForm.bridge} onChange={(e) => setVmForm((v) => ({ ...v, bridge: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100">
+                    className={fieldClass}>
                     {(computeOptions?.bridges || []).map((bridge: string) => <option key={bridge} value={bridge}>{bridge}</option>)}
                   </select>
                 </div>
               </div>
 
-              <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-[11px] text-slate-400">
+              <div className={`rounded-lg border p-3 text-[11px] ${panelClass}`}>
                 VM console: graphical noVNC. After the VM reaches Running, use the Console button in the VM table.
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <div className={`flex justify-end gap-2 pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>
                 <button type="button" onClick={() => setShowVmWizard(false)} disabled={isWorking}
-                  className="px-3 py-2 rounded-lg border border-slate-700 text-slate-300">
+                  className={`px-3 py-2 rounded-lg border ${isLight ? 'border-slate-300 text-slate-700 hover:bg-slate-50' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}`}>
                   Cancel
                 </button>
                 <button type="submit"

@@ -51,11 +51,22 @@ export default function App() {
 
   // App Shell States
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
+  const getSystemTheme = (): 'dark' | 'light' =>
+    window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() => getSystemTheme());
   const [selectedEnvironment, setSelectedEnvironment] = useState('Production');
   const [selectedRegion, setSelectedRegion] = useState('us-atl-1');
 
-  // Synchronize theme to document element
+  // System theme is authoritative. Nova follows OS/browser appearance changes live.
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const applySystemTheme = (dark: boolean) => setThemeMode(dark ? 'dark' : 'light');
+    applySystemTheme(media.matches);
+    const listener = (event: MediaQueryListEvent) => applySystemTheme(event.matches);
+    media.addEventListener?.('change', listener);
+    return () => media.removeEventListener?.('change', listener);
+  }, []);
+
   useEffect(() => {
     if (themeMode === 'light') {
       document.documentElement.classList.remove('dark');
@@ -200,7 +211,7 @@ export default function App() {
         onToggleNotifications={() => setIsNotificationsOpen((prev) => !prev)}
         notifications={notifications}
         unreadNotifications={unreadNotificationCount}
-        onToggleTheme={() => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))}
+        onToggleTheme={undefined}
         themeMode={themeMode}
         onNavigate={handleNavigate}
       />
@@ -343,7 +354,7 @@ export default function App() {
             ) : activeView === 'settings' ? (
               <SettingsView
                 themeMode={themeMode}
-                onToggleTheme={() => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))}
+                onToggleTheme={undefined}
                 activeSubTab={activeSubTab}
                 onTabChange={(tab) => setActiveSubTab(tab)}
               />

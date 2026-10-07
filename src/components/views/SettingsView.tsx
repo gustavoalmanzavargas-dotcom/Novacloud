@@ -296,13 +296,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     Active Color Mode
                   </p>
                   <p className={`text-xs ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                    Switch between high-contrast Dark Nova theme and clean Light mode.
+                    Nova automatically follows your operating system or browser light/dark appearance.
                   </p>
                 </div>
 
                 <button
                   type="button"
-                  onClick={onToggleTheme}
+                  disabled
+                  aria-disabled="true"
                   className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold text-xs border transition-all cursor-pointer ${
                     isLight
                       ? 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
@@ -312,12 +313,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   {isLight ? (
                     <>
                       <Moon className="w-4 h-4 text-indigo-500" />
-                      <span>Switch to Dark Theme</span>
+                      <span>Following System Theme</span>
                     </>
                   ) : (
                     <>
                       <Sun className="w-4 h-4 text-amber-400" />
-                      <span>Switch to Light Theme</span>
+                      <span>Following System Theme</span>
                     </>
                   )}
                 </button>
