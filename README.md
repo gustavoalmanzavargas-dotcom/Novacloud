@@ -6,7 +6,7 @@ Cyverax Nova is a self-hosted cloud platform with its own control plane, resourc
 
 ## Architecture
 
-NovaCloud is **not a Proxmox, VMware, Hyper-V, or public-cloud frontend**. The Nova UI communicates only with the Nova control API.
+NovaCloud is its own cloud control plane. The Nova UI communicates only with the Nova control API.
 
 ```text
 NovaCloud UI
@@ -86,9 +86,6 @@ NOVA_AGENT_TOKEN=THE-TOKEN-PRINTED-BY-THE-AGENT-INSTALLER
 
 Keep the agent token secret. It grants host-control authority.
 
-## Optional controller LXC helper
-
-The repository includes `proxmox/create-lxc.sh` only as a convenience for creating the **Nova controller LXC** on an existing Proxmox host. Proxmox is not a Nova runtime provider and Nova does not use the Proxmox API to manage workloads.
 
 ## Update an installed controller
 

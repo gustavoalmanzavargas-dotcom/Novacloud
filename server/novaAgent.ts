@@ -7,6 +7,29 @@ import { spawnSync } from 'child_process';
 import http from 'http';
 import https from 'https';
 
+type NovaNetwork = {
+  id: string;
+  name: string;
+  cidr: string;
+  gateway: string;
+  bridge: string;
+  nat: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type NovaVolume = {
+  id: string;
+  name: string;
+  sizeGb: number;
+  path: string;
+  format: 'qcow2';
+  status: 'Available' | 'In-Use';
+  attachedTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type InstanceState = {
   id: string;
   name: string;
@@ -35,10 +58,12 @@ const stateDir = process.env.NOVA_AGENT_STATE_DIR || '/var/lib/novacloud-agent';
 const instancesDir = path.join(stateDir, 'instances');
 const imagesDir = path.join(stateDir, 'images');
 const disksDir = path.join(stateDir, 'disks');
+const networksDir = path.join(stateDir, 'networks');
+const volumesDir = path.join(stateDir, 'volumes');
 const runDir = process.env.NOVA_AGENT_RUN_DIR || '/run/novacloud-agent';
 const defaultBridge = process.env.NOVA_AGENT_BRIDGE || 'novabr0';
 
-for (const dir of [stateDir, instancesDir, imagesDir, disksDir, runDir]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [stateDir, instancesDir, imagesDir, disksDir, networksDir, volumesDir, runDir]) fs.mkdirSync(dir, { recursive: true });
 
 function requireToken(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!token || req.headers.authorization !== `Bearer ${token}`) {
@@ -67,6 +92,62 @@ function safeId(value: string) {
 function safeFilename(value: string) {
   if (!/^[A-Za-z0-9._-]{1,160}$/.test(value)) throw new Error('Invalid filename');
   return value;
+}
+
+function jsonFile(dir: string, id: string) {
+  return path.join(dir, `${safeId(id)}.json`);
+}
+
+function saveJson(target: string, value: unknown) {
+  const temp = `${target}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(temp, target);
+}
+
+function readJson<T>(target: string): T {
+  return JSON.parse(fs.readFileSync(target, 'utf8')) as T;
+}
+
+function listJson<T>(dir: string): T[] {
+  return fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => {
+      try { return readJson<T>(path.join(dir, name)); } catch { return null; }
+    })
+    .filter(Boolean) as T[];
+}
+
+function parseIpv4Cidr(cidr: string) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d|[12]\d|3[0-2])$/.exec(cidr);
+  if (!match) throw new Error('Invalid IPv4 CIDR');
+  const octets = match.slice(1, 5).map(Number);
+  if (octets.some((value) => value < 0 || value > 255)) throw new Error('Invalid IPv4 CIDR');
+  const prefix = Number(match[5]);
+  const value = (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  const network = value & mask;
+  const gateway = (network + 1) >>> 0;
+  const toIp = (number: number) => [
+    (number >>> 24) & 255,
+    (number >>> 16) & 255,
+    (number >>> 8) & 255,
+    number & 255,
+  ].join('.');
+  return { prefix, network: toIp(network), gateway: toIp(gateway) };
+}
+
+function ensureNatRule(cidr: string) {
+  if (!commandExists('nft')) return;
+  const uplink = spawnSync('sh', ['-lc', "ip route | awk '/default/ {print $5; exit}'"], { encoding: 'utf8' }).stdout.trim();
+  if (!uplink) return;
+  spawnSync('nft', ['list', 'table', 'ip', 'nova_nat'], { stdio: 'ignore' }).status === 0 ||
+    spawnSync('nft', ['add', 'table', 'ip', 'nova_nat'], { stdio: 'ignore' });
+  spawnSync('nft', ['list', 'chain', 'ip', 'nova_nat', 'postrouting'], { stdio: 'ignore' }).status === 0 ||
+    spawnSync('nft', ['add', 'chain', 'ip', 'nova_nat', 'postrouting', '{', 'type', 'nat', 'hook', 'postrouting', 'priority', '100', ';', 'policy', 'accept', ';', '}'], { stdio: 'ignore' });
+  const listed = spawnSync('nft', ['list', 'chain', 'ip', 'nova_nat', 'postrouting'], { encoding: 'utf8' }).stdout || '';
+  if (!listed.includes(cidr)) {
+    run('nft', ['add', 'rule', 'ip', 'nova_nat', 'postrouting', 'ip', 'saddr', cidr, 'oifname', uplink, 'masquerade']);
+  }
 }
 
 function instanceFile(id: string) {
@@ -405,6 +486,117 @@ app.post('/v1/instances/:id/snapshots/:name/rollback', (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Snapshot rollback failed' });
+  }
+});
+
+app.get('/v1/networks', (_req, res) => {
+  res.json(listJson<NovaNetwork>(networksDir));
+});
+
+app.post('/v1/networks', (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const cidr = String(req.body?.cidr || '').trim();
+    const nat = req.body?.nat !== false;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid network name is required' });
+    const parsed = parseIpv4Cidr(cidr);
+    if (listJson<NovaNetwork>(networksDir).some((item) => item.name === name || item.cidr === cidr)) {
+      return res.status(409).json({ error: 'A network with that name or CIDR already exists' });
+    }
+    const id = crypto.randomUUID();
+    const bridge = `nvb${id.replace(/-/g, '').slice(0, 10)}`;
+    run('ip', ['link', 'add', 'name', bridge, 'type', 'bridge']);
+    try {
+      run('ip', ['addr', 'add', `${parsed.gateway}/${parsed.prefix}`, 'dev', bridge]);
+      run('ip', ['link', 'set', bridge, 'up']);
+      if (nat) ensureNatRule(cidr);
+    } catch (error) {
+      spawnSync('ip', ['link', 'del', bridge], { stdio: 'ignore' });
+      throw error;
+    }
+    const network: NovaNetwork = {
+      id, name, cidr, gateway: parsed.gateway, bridge, nat,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    saveJson(jsonFile(networksDir, id), network);
+    res.status(201).json(network);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Network creation failed' });
+  }
+});
+
+app.delete('/v1/networks/:id', (req, res) => {
+  try {
+    const target = jsonFile(networksDir, req.params.id);
+    const network = readJson<NovaNetwork>(target);
+    const inUse = listInstances().some((instance) => instance.bridge === network.bridge);
+    if (inUse) return res.status(409).json({ error: 'Network is attached to one or more running or configured instances' });
+    spawnSync('ip', ['link', 'del', network.bridge], { stdio: 'ignore' });
+    fs.unlinkSync(target);
+    res.status(204).end();
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Network deletion failed' });
+  }
+});
+
+app.get('/v1/volumes', (_req, res) => {
+  res.json(listJson<NovaVolume>(volumesDir).map((volume) => ({
+    ...volume,
+    exists: fs.existsSync(volume.path),
+  })));
+});
+
+app.post('/v1/volumes', (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const sizeGb = Number(req.body?.sizeGb || 20);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid volume name is required' });
+    if (!Number.isFinite(sizeGb) || sizeGb < 1 || sizeGb > 65536) return res.status(400).json({ error: 'Volume size must be between 1 and 65536 GiB' });
+    if (listJson<NovaVolume>(volumesDir).some((item) => item.name === name)) return res.status(409).json({ error: 'A volume with that name already exists' });
+    const id = crypto.randomUUID();
+    const volumePath = path.join(disksDir, `volume-${id}.qcow2`);
+    run('qemu-img', ['create', '-f', 'qcow2', volumePath, `${sizeGb}G`]);
+    const volume: NovaVolume = {
+      id, name, sizeGb, path: volumePath, format: 'qcow2', status: 'Available', attachedTo: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    saveJson(jsonFile(volumesDir, id), volume);
+    res.status(201).json(volume);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Volume creation failed' });
+  }
+});
+
+app.patch('/v1/volumes/:id', (req, res) => {
+  try {
+    const target = jsonFile(volumesDir, req.params.id);
+    const volume = readJson<NovaVolume>(target);
+    const sizeGb = Number(req.body?.sizeGb || volume.sizeGb);
+    if (!Number.isFinite(sizeGb) || sizeGb < volume.sizeGb) return res.status(400).json({ error: 'Volumes can only be expanded' });
+    if (sizeGb > volume.sizeGb) {
+      run('qemu-img', ['resize', volume.path, `${sizeGb}G`]);
+      volume.sizeGb = sizeGb;
+      volume.updatedAt = new Date().toISOString();
+      saveJson(target, volume);
+    }
+    res.json(volume);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Volume resize failed' });
+  }
+});
+
+app.delete('/v1/volumes/:id', (req, res) => {
+  try {
+    const target = jsonFile(volumesDir, req.params.id);
+    const volume = readJson<NovaVolume>(target);
+    if (volume.attachedTo) return res.status(409).json({ error: 'Detach the volume before deleting it' });
+    try { fs.unlinkSync(volume.path); } catch {}
+    fs.unlinkSync(target);
+    res.status(204).end();
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Volume deletion failed' });
   }
 });
 

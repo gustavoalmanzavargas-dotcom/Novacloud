@@ -331,7 +331,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       });
       if (!response.ok) throw new Error(await readError(response, 'VM creation failed'));
       const result = await response.json();
-      showToast(`VM "${result.name}" creation submitted to Nova Agent as ID ${result.vmid}.`);
+      showToast(`VM "${result.name || name}" created by Nova.`);
       window.setTimeout(() => window.location.reload(), 2500);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'VM creation failed');
@@ -1066,7 +1066,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
                   <span>Policy: <strong className="text-slate-200">{grp.scalingPolicy}</strong></span>
                   <button
-                    onClick={() => showToast(`Autoscaling evaluation is unavailable for ${grp.name} on the current provider.`)}
+                    onClick={() => showToast(`Autoscaling evaluation is unavailable for ${grp.name} until Nova Scheduler autoscaling is enabled.`)}
                     className="text-xs text-cyan-400 hover:text-cyan-300 font-medium cursor-pointer"
                   >
                     Edit Policy

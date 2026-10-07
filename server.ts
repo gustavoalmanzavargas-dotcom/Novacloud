@@ -48,10 +48,12 @@ async function syncNovaAgentInventory() {
   if (!novaAgentConfigured()) return;
   if (novaSyncInFlight) return novaSyncInFlight;
   novaSyncInFlight = (async () => {
-  const [host, instances, images] = await Promise.all([
+  const [host, instances, images, networks, volumes] = await Promise.all([
     novaAgentRequest('/v1/host'),
     novaAgentRequest('/v1/instances'),
     novaAgentRequest('/v1/images'),
+    novaAgentRequest('/v1/networks'),
+    novaAgentRequest('/v1/volumes'),
   ]);
 
   const hostResult = await pool.query(
@@ -131,10 +133,60 @@ async function syncNovaAgentInventory() {
     );
   }
 
+  const networkIds: string[] = [];
+  for (const network of Array.isArray(networks) ? networks : []) {
+    networkIds.push(network.id);
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('network', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [network.id, network],
+    );
+  }
+  if (networkIds.length) {
+    await pool.query(
+      `DELETE FROM resources WHERE provider = 'nova-native' AND type = 'network'
+       AND NOT (external_id = ANY($1::text[]))`,
+      [networkIds],
+    );
+  } else {
+    await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'network'`);
+  }
+
+  const volumeIds: string[] = [];
+  for (const volume of Array.isArray(volumes) ? volumes : []) {
+    volumeIds.push(volume.id);
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('storage', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [volume.id, {
+        ...volume,
+        type: 'Block Volume',
+        capacityGb: Number(volume.sizeGb || 0),
+        usedGb: 0,
+        region: 'local',
+      }],
+    );
+  }
+  if (volumeIds.length) {
+    await pool.query(
+      `DELETE FROM resources WHERE provider = 'nova-native' AND type = 'storage'
+       AND NOT (external_id = ANY($1::text[]))`,
+      [volumeIds],
+    );
+  } else {
+    await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'storage'`);
+  }
+
   publishNovaEvent('resource-sync', {
     hostId: host.id,
     instances: instanceIds.length,
     images: Array.isArray(images) ? images.length : 0,
+    networks: networkIds.length,
+    volumes: volumeIds.length,
     timestamp: new Date().toISOString(),
   });
   })().finally(() => {
@@ -454,6 +506,109 @@ app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
     await finishJob(jobId, 'failed', {}, message);
     res.status(502).json({ error: message, jobId });
   }
+});
+
+app.get('/api/networking/vpcs', requireAuth, async (_req, res) => {
+  try {
+    res.json(await novaAgentRequest('/v1/networks'));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Nova networks' });
+  }
+});
+
+app.post('/api/networking/vpcs', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const cidr = String(req.body?.cidr || '').trim();
+  const nat = req.body?.nat !== false;
+  const jobId = await createJob('network.create', req.session.userId, 'network', null, { name, cidr, nat });
+  try {
+    const network = await novaAgentRequest('/v1/networks', 'POST', { name, cidr, nat });
+    await finishJob(jobId, 'succeeded', network);
+    await syncNovaAgentInventory();
+    res.status(201).json({ ...network, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network creation failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.delete('/api/networking/vpcs/:id', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const jobId = await createJob('network.delete', req.session.userId, 'network', id, {});
+  try {
+    await novaAgentRequest(`/v1/networks/${encodeURIComponent(id)}`, 'DELETE');
+    await finishJob(jobId, 'succeeded', {});
+    await syncNovaAgentInventory();
+    res.status(204).end();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network deletion failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.get('/api/storage/volumes', requireAuth, async (_req, res) => {
+  try {
+    res.json(await novaAgentRequest('/v1/volumes'));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Nova volumes' });
+  }
+});
+
+app.post('/api/storage/volumes', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const sizeGb = Number(req.body?.sizeGb || 20);
+  const jobId = await createJob('storage.volume.create', req.session.userId, 'storage', null, { name, sizeGb });
+  try {
+    const volume = await novaAgentRequest('/v1/volumes', 'POST', { name, sizeGb });
+    await finishJob(jobId, 'succeeded', volume);
+    await syncNovaAgentInventory();
+    res.status(201).json({ ...volume, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Volume creation failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.patch('/api/storage/volumes/:id', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const sizeGb = Number(req.body?.sizeGb);
+  const jobId = await createJob('storage.volume.resize', req.session.userId, 'storage', id, { sizeGb });
+  try {
+    const volume = await novaAgentRequest(`/v1/volumes/${encodeURIComponent(id)}`, 'PATCH', { sizeGb });
+    await finishJob(jobId, 'succeeded', volume);
+    await syncNovaAgentInventory();
+    res.json({ ...volume, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Volume resize failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.delete('/api/storage/volumes/:id', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const jobId = await createJob('storage.volume.delete', req.session.userId, 'storage', id, {});
+  try {
+    await novaAgentRequest(`/v1/volumes/${encodeURIComponent(id)}`, 'DELETE');
+    await finishJob(jobId, 'succeeded', {});
+    await syncNovaAgentInventory();
+    res.status(204).end();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Volume deletion failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.get('/api/vlan/matrix', requireAuth, async (_req, res) => {
+  res.json({ totalVlans: 0, vlanRange: 'Not configured', fabric: 'Nova native networking', matrix: [] });
+});
+
+app.post('/api/vlan/verify', requireAuth, async (_req, res) => {
+  res.status(409).json({ error: 'Nova VLAN isolation testing is not enabled yet' });
 });
 
 app.get('/api/compute/ssh-keys', requireAuth, async (_req, res) => {
