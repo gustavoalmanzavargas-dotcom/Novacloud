@@ -195,7 +195,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
     try {
       const result = await api.verifyVlanIsolation();
       setIsolationResult(result);
-      showToast('Automated cross-tenant isolation test passed! 100% of inter-VLAN probe packets dropped.');
+      showToast('Nova network isolation verification completed.');
     } catch (err: any) {
       alert(err.message || 'Failed to run isolation test');
     } finally {
@@ -245,11 +245,17 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
               <span className="px-2.5 py-1 text-[11px] font-mono font-bold tracking-wider uppercase rounded-md bg-cyan-500/20 text-cyan-400 border border-cyan-500/40">
                 MASTER CLUSTER ACCOUNT
               </span>
-              <span className="px-2.5 py-1 text-[11px] font-mono font-semibold rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-                HOST HYPERVISOR FABRIC: ONLINE
+              <span className={`px-2.5 py-1 text-[11px] font-mono font-semibold rounded-md border ${
+                summary?.computeReady
+                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                  : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+              }`}>
+                {summary?.computeReady ? 'NOVA COMPUTE HOST: ONLINE' : 'NOVA COMPUTE HOST: OFFLINE'}
               </span>
               <span className={`text-xs ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                Hardware EVPN-VXLAN Active • Zero-Crosstalk Enforced
+                {summary?.computeReady
+                  ? `${summary.networkFabric} • ${summary.onlineNodes} host(s) online`
+                  : 'Connect a Nova Agent compute host to deploy client workloads'}
               </span>
             </div>
 
@@ -258,8 +264,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
             </h1>
 
             <p className={`text-sm max-w-3xl leading-relaxed ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
-              Host independent client instances on your bare-metal cluster. Architecture operates exactly like AWS VPC, GCP Virtual Networks, and Azure VNet:
-              each client instance is completely sealed in its own isolated software-defined VLAN (RFC 1918 private CIDR) with virtual outbound NAT, preventing IP collisions and public internet exposure. You have root controls to upgrade or downgrade CPU, GPU, and RAM on-demand.
+              Nova client instances run on registered Nova compute hosts. Each tenant receives a Nova-managed private network and NAT boundary. This page reports only resources actually discovered or created by Nova.
             </p>
           </div>
 
@@ -267,7 +272,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
             <button
               id="verify-isolation-btn"
               onClick={handleRunIsolationTest}
-              disabled={isVerifyingIsolation}
+              disabled={isVerifyingIsolation || !summary?.computeReady}
               className={`flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
                 isLight
                   ? 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-300'
@@ -295,7 +300,8 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
             <button
               id="deploy-client-instance-btn"
               onClick={() => setIsDeployModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-bold text-slate-950 bg-cyan-400 hover:bg-cyan-300 transition-all rounded-lg shadow-md shadow-cyan-500/20 active:scale-98 cursor-pointer"
+              disabled={!summary?.computeReady}
+              className="flex items-center gap-2 px-4 py-2 text-xs font-bold text-slate-950 bg-cyan-400 hover:bg-cyan-300 transition-all rounded-lg shadow-md shadow-cyan-500/20 active:scale-98 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Plus className="w-4 h-4 font-bold" />
               <span>Deploy Clean Client Instance</span>
@@ -384,7 +390,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
                 />
               </div>
               <p className="text-[10px] text-slate-400 mt-1 font-mono">
-                H100 SXM5 / A100 / L4 High-Perf
+                {summary.totalGpus > 0 ? 'Detected on Nova hosts' : 'No GPUs detected'}
               </p>
             </div>
 
@@ -392,7 +398,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
               <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
                 <span className="flex items-center gap-1.5 font-medium">
                   <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
-                  Ceph NVMe Storage
+                  Nova Host Storage
                 </span>
                 <span className="font-mono text-emerald-400 font-bold">
                   {summary.allocatedStorageTb} / {summary.totalStorageTb} TB
@@ -421,10 +427,10 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
               </div>
               <p className="text-xs font-semibold text-emerald-400 mt-1 flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3" />
-                100% Isolated (0 Cross-Leak)
+                {summary.activeVlansCount > 0 ? 'Nova networks active' : 'No tenant networks'}
               </p>
               <p className="text-[10px] text-slate-400 mt-1 font-mono">
-                Range: VLAN 1000 - 4094
+                {summary.networkFabric}
               </p>
             </div>
           </div>
@@ -457,7 +463,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
       {loading ? (
         <div className="p-12 text-center">
           <RefreshCw className="w-8 h-8 mx-auto animate-spin text-cyan-400 mb-3" />
-          <p className="text-sm text-slate-400">Querying cluster hypervisors and client tenant state...</p>
+          <p className="text-sm text-slate-400">Querying Nova hosts and client state...</p>
         </div>
       ) : error ? (
         <div className="p-6 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center gap-3">
@@ -472,11 +478,12 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
           <Users className="w-12 h-12 mx-auto text-slate-600 mb-3" />
           <h3 className={`text-base font-bold ${isLight ? 'text-slate-800' : 'text-white'}`}>No client instances found</h3>
           <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-            {searchQuery ? 'No client matches your search filter.' : 'Deploy your first client instance to host their workload on this cluster.'}
+            {searchQuery ? 'No client matches your search filter.' : summary?.computeReady ? 'Deploy your first Nova client instance.' : 'No Nova compute host is connected yet.'}
           </p>
           <button
             onClick={() => setIsDeployModalOpen(true)}
-            className="mt-4 px-4 py-2 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+            disabled={!summary?.computeReady}
+            className="mt-4 px-4 py-2 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             + Deploy Clean Client Instance
           </button>
@@ -611,10 +618,10 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
                     <div className="flex items-center justify-between text-slate-400 mb-1.5">
                       <span className="flex items-center gap-1 font-semibold text-cyan-400">
                         <Network className="w-3.5 h-3.5" />
-                        Isolated Network (VLAN)
+                        Nova Private Network
                       </span>
                       <span className="font-mono font-bold text-white bg-slate-800 px-1.5 py-0.5 rounded text-[10px]">
-                        VLAN {client.vlanId}
+                        {client.vlanId ? `VLAN ${client.vlanId}` : 'BRIDGE'}
                       </span>
                     </div>
                     <div className="space-y-1 font-mono text-[11px]">
@@ -632,7 +639,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
                       </p>
                       <p className="text-[10px] text-cyan-400/90 pt-1 flex items-center gap-1">
                         <Lock className="w-3 h-3" />
-                        Zero-Exposure • No Raw Public IPs
+                        Nova-managed private network
                       </p>
                     </div>
                   </div>
@@ -693,7 +700,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
                       {client.gpuAllocated}
                     </p>
                     <p className="text-[10px] text-slate-400 mt-1 font-mono">
-                      {hasGpu ? 'Direct PCIe Passthrough / vGPU Slice' : 'Standard Virtualized Compute'}
+                      {hasGpu ? 'GPU assigned by Nova host' : 'No GPU assigned'}
                     </p>
                   </div>
 
@@ -842,7 +849,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
                 <div className="flex justify-between text-xs font-semibold">
                   <span className="flex items-center gap-1.5">
                     <HardDrive className="w-4 h-4 text-emerald-400" />
-                    Ceph NVMe Gen4 Storage:
+                    Nova Block Storage:
                   </span>
                   <span className="font-mono text-emerald-400 font-bold text-sm">
                     {resizeStorage} GB ($0.12/GB)
@@ -922,7 +929,7 @@ export const ClientInstancesView: React.FC<ClientInstancesViewProps> = ({
                   Deploy Clean Client Instance
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Allocates a dedicated hardware slice, automatic isolated VLAN ID, and private RFC 1918 subnet.
+                  Creates a Nova tenant network and a real VM on a connected Nova compute host.
                 </p>
               </div>
               <button
