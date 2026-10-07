@@ -24,25 +24,34 @@ export interface GpuTierOption {
   monthlyCost: number;
 }
 
+async function readJson<T>(res: Response, fallback: string): Promise<T> {
+  const text = await res.text();
+  let body: any = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(res.ok ? fallback : `${fallback} (server returned non-JSON response)`);
+  }
+  if (!res.ok) throw new Error(body?.error || fallback);
+  return body as T;
+}
+
 export const api = {
   // Cluster
   async getClusterSummary(): Promise<MasterClusterSummary> {
     const res = await fetch('/api/cluster/summary');
-    if (!res.ok) throw new Error('Failed to fetch cluster summary');
-    return res.json();
+    return readJson<MasterClusterSummary>(res, 'Failed to fetch cluster summary');
   },
 
   // Clients / Tenants
   async getClientTenants(): Promise<ClientTenantInstance[]> {
     const res = await fetch('/api/clients');
-    if (!res.ok) throw new Error('Failed to fetch client instances');
-    return res.json();
+    return readJson<ClientTenantInstance[]>(res, 'Failed to fetch client instances');
   },
 
   async getClientTenant(id: string): Promise<ClientTenantInstance> {
     const res = await fetch(`/api/clients/${id}`);
-    if (!res.ok) throw new Error('Failed to fetch client details');
-    return res.json();
+    return readJson<ClientTenantInstance>(res, 'Failed to fetch client details');
   },
 
   async deployClientTenant(payload: {
@@ -61,11 +70,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to deploy client instance');
-    }
-    return res.json();
+    return readJson<ClientTenantInstance>(res, 'Failed to deploy client instance');
   },
 
   async updateClientResources(
@@ -83,11 +88,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to update client resources');
-    }
-    return res.json();
+    return readJson<ClientTenantInstance>(res, 'Failed to update client resources');
   },
 
   async executeClientAction(
@@ -99,11 +100,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action }),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to execute action');
-    }
-    return res.json();
+    return readJson<ClientTenantInstance>(res, 'Failed to execute action');
   },
 
   async deleteClientTenant(id: string): Promise<void> {
@@ -119,8 +116,7 @@ export const api = {
   // Marketplace
   async getMarketplaceCatalog(): Promise<{ total: number; apps: MarketplaceAppResponse[]; gpuOptions: GpuTierOption[] }> {
     const res = await fetch('/api/marketplace/catalog');
-    if (!res.ok) throw new Error('Failed to fetch marketplace catalog');
-    return res.json();
+    return readJson<{ total: number; apps: MarketplaceAppResponse[]; gpuOptions: GpuTierOption[] }>(res, 'Failed to fetch marketplace catalog');
   },
 
   async installMarketplaceApp(clientId: string, appId: string): Promise<{ success: boolean; message: string; client: ClientTenantInstance }> {
@@ -139,8 +135,7 @@ export const api = {
   // VLAN & Network Virtualization
   async getVlanMatrix(): Promise<{ totalVlans: number; vlanRange: string; fabric: string; matrix: VlanNetworkMapping[] }> {
     const res = await fetch('/api/vlan/matrix');
-    if (!res.ok) throw new Error('Failed to fetch VLAN matrix');
-    return res.json();
+    return readJson<{ totalVlans: number; vlanRange: string; fabric: string; matrix: VlanNetworkMapping[] }>(res, 'Failed to fetch VLAN matrix');
   },
 
   async verifyVlanIsolation(): Promise<{
@@ -155,7 +150,6 @@ export const api = {
     const res = await fetch('/api/vlan/verify', {
       method: 'POST',
     });
-    if (!res.ok) throw new Error('Failed to run isolation verification');
-    return res.json();
+    return readJson<any>(res, 'Failed to run isolation verification');
   },
 };
