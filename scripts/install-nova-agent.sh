@@ -18,7 +18,14 @@ AGENT_BIND="${NOVA_AGENT_BIND:-0.0.0.0}"
 
 echo "Installing Nova Agent host dependencies..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync nodejs npm qemu-system-x86 qemu-utils iproute2 nftables
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables
+
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  echo "Node.js/npm are not installed. Installing the Debian packages..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm
+else
+  echo "Using existing Node.js $(node --version) and npm $(npm --version)."
+fi
 
 if [[ -e /dev/kvm ]]; then
   echo "Nova acceleration: KVM hardware acceleration available."
