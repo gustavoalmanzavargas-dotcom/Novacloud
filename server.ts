@@ -1340,6 +1340,14 @@ app.delete('/api/networking/vpcs/:id', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/storage/devices', requireAuth, async (_req, res) => {
+  try {
+    res.json(await novaAgentRequest('/v1/storage/devices'));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to discover host storage devices' });
+  }
+});
+
 app.get('/api/storage/volumes', requireAuth, async (_req, res) => {
   try {
     res.json(await novaAgentRequest('/v1/volumes'));
@@ -1628,8 +1636,25 @@ async function startServer() {
     const noVncPath = '/usr/share/novnc';
     if (fs.existsSync(noVncPath)) app.use('/novnc', express.static(noVncPath));
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
+    app.use('/assets', express.static(path.join(distPath, 'assets'), {
+      immutable: true,
+      maxAge: '1y',
+    }));
+    app.use(express.static(distPath, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          res.setHeader('Pragma', 'no-cache');
+          res.setHeader('Expires', '0');
+        }
+      },
+    }));
+    app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
 
   const server = http.createServer(app);
