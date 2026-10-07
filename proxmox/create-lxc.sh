@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPOSITORY_RAW="https://raw.githubusercontent.com/Ceyeberkepp/Novacloud/main"
+REPOSITORY_RAW="https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novacloud/main"
 
 die() {
   echo "Error: $*" >&2
@@ -71,17 +71,15 @@ read -rsp "Confirm administrator password: " ADMIN_PASSWORD_CONFIRM
 echo
 [[ "${ADMIN_PASSWORD}" == "${ADMIN_PASSWORD_CONFIRM}" ]] || die "Passwords do not match."
 read -rp "Optional Gemini API key (press Enter to skip): " GEMINI_KEY
-read -rp "Proxmox API URL for inventory sync [https://127.0.0.1:8006]: " PROXMOX_HOST
-PROXMOX_HOST="${PROXMOX_HOST:-https://127.0.0.1:8006}"
-read -rp "Proxmox API token ID (user@realm!token, press Enter to skip provider sync): " PROXMOX_TOKEN_ID
-PROXMOX_TOKEN_SECRET=""
-PROXMOX_VERIFY_TLS="true"
-if [[ -n "${PROXMOX_TOKEN_ID}" ]]; then
-  read -rsp "Proxmox API token secret: " PROXMOX_TOKEN_SECRET
+read -rp "Nova Agent URL (press Enter to configure later): " NOVA_AGENT_URL
+NOVA_AGENT_TOKEN=""
+NOVA_AGENT_VERIFY_TLS="true"
+if [[ -n "${NOVA_AGENT_URL}" ]]; then
+  read -rsp "Nova Agent token: " NOVA_AGENT_TOKEN
   echo
-  read -rp "Verify Proxmox TLS certificate? [Y/n]: " PROXMOX_TLS_ANSWER
-  if [[ "${PROXMOX_TLS_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
-    PROXMOX_VERIFY_TLS="false"
+  read -rp "Verify Nova Agent TLS certificate? [Y/n]: " NOVA_AGENT_TLS_ANSWER
+  if [[ "${NOVA_AGENT_TLS_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
+    NOVA_AGENT_VERIFY_TLS="false"
   fi
 fi
 
@@ -153,10 +151,9 @@ chmod 600 "${SECRETS_FILE}"
   printf 'export NOVA_ADMIN_EMAIL=%q\n' "${ADMIN_EMAIL}"
   printf 'export NOVA_ADMIN_PASSWORD=%q\n' "${ADMIN_PASSWORD}"
   printf 'export NOVA_GEMINI_API_KEY=%q\n' "${GEMINI_KEY}"
-  printf 'export NOVA_PROXMOX_HOST=%q\n' "${PROXMOX_HOST}"
-  printf 'export NOVA_PROXMOX_TOKEN_ID=%q\n' "${PROXMOX_TOKEN_ID}"
-  printf 'export NOVA_PROXMOX_TOKEN_SECRET=%q\n' "${PROXMOX_TOKEN_SECRET}"
-  printf 'export NOVA_PROXMOX_VERIFY_TLS=%q\n' "${PROXMOX_VERIFY_TLS}"
+  printf 'export NOVA_AGENT_URL=%q\n' "${NOVA_AGENT_URL}"
+  printf 'export NOVA_AGENT_TOKEN=%q\n' "${NOVA_AGENT_TOKEN}"
+  printf 'export NOVA_AGENT_VERIFY_TLS=%q\n' "${NOVA_AGENT_VERIFY_TLS}"
   printf 'export NOVA_ENABLE_TLS=%q\n' "${ENABLE_TLS}"
   printf 'export NOVA_TLS_EMAIL=%q\n' "${TLS_EMAIL}"
 } > "${SECRETS_FILE}"

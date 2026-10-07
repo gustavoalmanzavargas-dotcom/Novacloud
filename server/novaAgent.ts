@@ -1,0 +1,413 @@
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import crypto from 'crypto';
+import { spawnSync } from 'child_process';
+import http from 'http';
+import https from 'https';
+
+type InstanceState = {
+  id: string;
+  name: string;
+  status: 'Running' | 'Stopped' | 'Failed';
+  vcpu: number;
+  memoryMb: number;
+  diskGb: number;
+  diskPath: string;
+  imagePath?: string;
+  bridge: string;
+  tap: string;
+  mac: string;
+  pidFile: string;
+  qmpSocket: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const app = express();
+app.use(express.json({ limit: '4mb' }));
+
+const port = Number(process.env.NOVA_AGENT_PORT || 9443);
+const bind = process.env.NOVA_AGENT_BIND || '127.0.0.1';
+const token = String(process.env.NOVA_AGENT_TOKEN || '');
+const stateDir = process.env.NOVA_AGENT_STATE_DIR || '/var/lib/novacloud-agent';
+const instancesDir = path.join(stateDir, 'instances');
+const imagesDir = path.join(stateDir, 'images');
+const disksDir = path.join(stateDir, 'disks');
+const runDir = process.env.NOVA_AGENT_RUN_DIR || '/run/novacloud-agent';
+const defaultBridge = process.env.NOVA_AGENT_BRIDGE || 'novabr0';
+
+for (const dir of [stateDir, instancesDir, imagesDir, disksDir, runDir]) fs.mkdirSync(dir, { recursive: true });
+
+function requireToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!token || req.headers.authorization !== `Bearer ${token}`) {
+    return res.status(401).json({ error: 'Nova Agent authentication failed' });
+  }
+  next();
+}
+app.use('/v1', requireToken);
+
+function commandExists(name: string) {
+  return spawnSync('sh', ['-lc', `command -v ${name}`], { stdio: 'ignore' }).status === 0;
+}
+
+function run(command: string, args: string[], timeout = 30000) {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error((result.stderr || result.stdout || `${command} failed`).trim());
+  return (result.stdout || '').trim();
+}
+
+function safeId(value: string) {
+  if (!/^[a-f0-9-]{36}$/.test(value)) throw new Error('Invalid instance identifier');
+  return value;
+}
+
+function safeFilename(value: string) {
+  if (!/^[A-Za-z0-9._-]{1,160}$/.test(value)) throw new Error('Invalid filename');
+  return value;
+}
+
+function instanceFile(id: string) {
+  return path.join(instancesDir, `${safeId(id)}.json`);
+}
+
+function readInstance(id: string): InstanceState {
+  return JSON.parse(fs.readFileSync(instanceFile(id), 'utf8'));
+}
+
+function saveInstance(instance: InstanceState) {
+  instance.updatedAt = new Date().toISOString();
+  const target = instanceFile(instance.id);
+  const temp = `${target}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(instance, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(temp, target);
+}
+
+function pidFor(instance: InstanceState) {
+  try {
+    const pid = Number(fs.readFileSync(instance.pidFile, 'utf8').trim());
+    if (pid > 1) {
+      process.kill(pid, 0);
+      return pid;
+    }
+  } catch {}
+  return null;
+}
+
+function currentState(instance: InstanceState): InstanceState {
+  const running = Boolean(pidFor(instance));
+  return { ...instance, status: running ? 'Running' : 'Stopped' };
+}
+
+function listInstances() {
+  return fs.readdirSync(instancesDir)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => {
+      try { return currentState(JSON.parse(fs.readFileSync(path.join(instancesDir, name), 'utf8'))); }
+      catch { return null; }
+    })
+    .filter(Boolean) as InstanceState[];
+}
+
+function ensureTap(instance: InstanceState) {
+  const existing = spawnSync('ip', ['link', 'show', instance.tap], { stdio: 'ignore' }).status === 0;
+  if (!existing) run('ip', ['tuntap', 'add', 'dev', instance.tap, 'mode', 'tap']);
+  run('ip', ['link', 'set', instance.tap, 'master', instance.bridge]);
+  run('ip', ['link', 'set', instance.tap, 'up']);
+}
+
+function destroyTap(instance: InstanceState) {
+  spawnSync('ip', ['link', 'del', instance.tap], { stdio: 'ignore' });
+}
+
+function startInstance(instance: InstanceState) {
+  if (pidFor(instance)) return currentState(instance);
+  if (!commandExists('qemu-system-x86_64')) throw new Error('QEMU is not installed on this Nova host');
+  ensureTap(instance);
+
+  const args = [
+    '-daemonize',
+    '-pidfile', instance.pidFile,
+    '-qmp', `unix:${instance.qmpSocket},server=on,wait=off`,
+    '-name', instance.name,
+    '-machine', 'q35,accel=kvm',
+    '-cpu', 'host',
+    '-smp', String(instance.vcpu),
+    '-m', String(instance.memoryMb),
+    '-drive', `file=${instance.diskPath},if=virtio,format=qcow2,cache=none,aio=native`,
+    '-netdev', `tap,id=net0,ifname=${instance.tap},script=no,downscript=no`,
+    '-device', `virtio-net-pci,netdev=net0,mac=${instance.mac}`,
+    '-display', 'none',
+    '-serial', 'none',
+    '-nodefaults',
+    '-no-reboot',
+  ];
+  if (instance.imagePath && fs.existsSync(instance.imagePath) && /\.iso$/i.test(instance.imagePath)) {
+    args.push('-drive', `file=${instance.imagePath},media=cdrom,readonly=on`, '-boot', 'order=d');
+  }
+  run('qemu-system-x86_64', args, 30000);
+  instance.status = 'Running';
+  saveInstance(instance);
+  return currentState(instance);
+}
+
+function stopInstance(instance: InstanceState) {
+  const pid = pidFor(instance);
+  if (pid) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    const until = Date.now() + 15000;
+    while (Date.now() < until) {
+      try { process.kill(pid, 0); } catch { break; }
+      spawnSync('sleep', ['0.2']);
+    }
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+  destroyTap(instance);
+  try { fs.unlinkSync(instance.pidFile); } catch {}
+  try { fs.unlinkSync(instance.qmpSocket); } catch {}
+  instance.status = 'Stopped';
+  saveInstance(instance);
+  return currentState(instance);
+}
+
+function hostFacts() {
+  const cpus = os.cpus();
+  const totalMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  const stat = fs.statfsSync(stateDir);
+  const interfaces = Object.entries(os.networkInterfaces()).flatMap(([name, values]) =>
+    (values || []).filter((entry) => entry.family === 'IPv4').map((entry) => ({
+      name, address: entry.address, cidr: entry.cidr, internal: entry.internal,
+    }))
+  );
+  return {
+    id: crypto.createHash('sha256').update(os.hostname()).digest('hex').slice(0, 24),
+    hostname: os.hostname(),
+    platform: os.platform(),
+    release: os.release(),
+    architecture: os.arch(),
+    cpuModel: cpus[0]?.model || 'Unknown',
+    cpuCount: cpus.length,
+    loadAverage: os.loadavg(),
+    uptimeSeconds: os.uptime(),
+    memory: {
+      totalBytes: totalMemory,
+      freeBytes: freeMemory,
+      usedBytes: totalMemory - freeMemory,
+    },
+    storage: {
+      path: stateDir,
+      totalBytes: stat.blocks * stat.bsize,
+      freeBytes: stat.bavail * stat.bsize,
+      usedBytes: (stat.blocks - stat.bfree) * stat.bsize,
+    },
+    capabilities: {
+      kvm: fs.existsSync('/dev/kvm'),
+      qemu: commandExists('qemu-system-x86_64'),
+      qemuImg: commandExists('qemu-img'),
+      nftables: commandExists('nft'),
+      iproute2: commandExists('ip'),
+      bridge: defaultBridge,
+    },
+    interfaces,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function download(urlText: string, destination: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlText);
+    if (!['http:', 'https:'].includes(url.protocol)) return reject(new Error('Only HTTP/HTTPS image URLs are allowed'));
+    const transport = url.protocol === 'https:' ? https : http;
+    const request = transport.get(url, { timeout: 30000 }, (response) => {
+      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume();
+        download(new URL(response.headers.location, url).toString(), destination).then(resolve, reject);
+        return;
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(new Error(`Image download returned HTTP ${response.statusCode || 0}`));
+        return;
+      }
+      const temp = `${destination}.part`;
+      const file = fs.createWriteStream(temp, { mode: 0o600 });
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        fs.renameSync(temp, destination);
+        resolve();
+      });
+      file.on('error', reject);
+    });
+    request.on('error', reject);
+    request.on('timeout', () => request.destroy(new Error('Image download timed out')));
+  });
+}
+
+app.get('/v1/health', (_req, res) => res.json({ status: 'ok', service: 'nova-agent', version: '0.1.0' }));
+app.get('/v1/host', (_req, res) => res.json(hostFacts()));
+app.get('/v1/instances', (_req, res) => res.json(listInstances()));
+
+app.post('/v1/instances', (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const vcpu = Number(req.body?.vcpu || 2);
+    const memoryMb = Number(req.body?.memoryMb || 4096);
+    const diskGb = Number(req.body?.diskGb || 32);
+    const bridge = String(req.body?.bridge || defaultBridge).trim();
+    const imageId = String(req.body?.imageId || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid instance name is required' });
+    if (!Number.isInteger(vcpu) || vcpu < 1 || vcpu > 256 || memoryMb < 512 || diskGb < 4) {
+      return res.status(400).json({ error: 'Instance resources are outside allowed limits' });
+    }
+    if (!/^[A-Za-z0-9_.:-]{1,32}$/.test(bridge)) return res.status(400).json({ error: 'Invalid bridge name' });
+    if (spawnSync('ip', ['link', 'show', bridge], { stdio: 'ignore' }).status !== 0) {
+      return res.status(400).json({ error: `Network bridge ${bridge} does not exist` });
+    }
+
+    const id = crypto.randomUUID();
+    const diskPath = path.join(disksDir, `${id}.qcow2`);
+    const imagePath = imageId ? path.join(imagesDir, safeFilename(imageId)) : undefined;
+    if (imagePath && !fs.existsSync(imagePath)) return res.status(400).json({ error: 'Selected image does not exist on this Nova host' });
+
+    if (imagePath && /\.qcow2$/i.test(imagePath)) {
+      run('qemu-img', ['create', '-f', 'qcow2', '-F', 'qcow2', '-b', imagePath, diskPath, `${diskGb}G`]);
+    } else {
+      run('qemu-img', ['create', '-f', 'qcow2', diskPath, `${diskGb}G`]);
+    }
+
+    const instance: InstanceState = {
+      id,
+      name,
+      status: 'Stopped',
+      vcpu,
+      memoryMb,
+      diskGb,
+      diskPath,
+      imagePath,
+      bridge,
+      tap: `nv${id.replace(/-/g, '').slice(0, 10)}`,
+      mac: '52:54:00:' + crypto.randomBytes(3).toString('hex').match(/.{2}/g)!.join(':'),
+      pidFile: path.join(runDir, `${id}.pid`),
+      qmpSocket: path.join(runDir, `${id}.qmp`),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    saveInstance(instance);
+    const shouldStart = req.body?.start !== false;
+    res.status(201).json(shouldStart ? startInstance(instance) : instance);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Instance creation failed' });
+  }
+});
+
+app.post('/v1/instances/:id/action', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    const action = String(req.body?.action || '');
+    if (action === 'start') return res.json(startInstance(instance));
+    if (action === 'stop' || action === 'shutdown') return res.json(stopInstance(instance));
+    if (action === 'reboot') {
+      stopInstance(instance);
+      return res.json(startInstance(instance));
+    }
+    return res.status(400).json({ error: 'Unsupported instance action' });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Instance action failed' });
+  }
+});
+
+app.delete('/v1/instances/:id', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    stopInstance(instance);
+    if (req.query.keepDisk !== 'true') {
+      try { fs.unlinkSync(instance.diskPath); } catch {}
+    }
+    fs.unlinkSync(instanceFile(instance.id));
+    res.status(204).end();
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Instance deletion failed' });
+  }
+});
+
+app.get('/v1/images', (_req, res) => {
+  const items = fs.readdirSync(imagesDir).filter((name) => !name.endsWith('.part')).map((name) => {
+    const stat = fs.statSync(path.join(imagesDir, name));
+    return {
+      id: name,
+      name,
+      sizeBytes: stat.size,
+      format: path.extname(name).slice(1).toLowerCase() || 'unknown',
+      createdAt: stat.birthtime.toISOString(),
+      updatedAt: stat.mtime.toISOString(),
+    };
+  });
+  res.json(items);
+});
+
+app.post('/v1/images/import-url', async (req, res) => {
+  try {
+    const url = String(req.body?.url || '').trim();
+    const filename = safeFilename(String(req.body?.filename || '').trim());
+    const destination = path.join(imagesDir, filename);
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'A valid HTTP/HTTPS URL is required' });
+    if (fs.existsSync(destination)) return res.status(409).json({ error: 'An image with that filename already exists' });
+    await download(url, destination);
+    res.status(201).json({ id: filename, name: filename, sizeBytes: fs.statSync(destination).size });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Image import failed' });
+  }
+});
+
+app.get('/v1/instances/:id/snapshots', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    const output = run('qemu-img', ['snapshot', '-l', '--output=json', instance.diskPath]);
+    const snapshots = JSON.parse(output || '[]').map((item: any) => ({
+      id: `${instance.id}:${item.name}`,
+      name: item.name,
+      sourceVm: instance.name,
+      sizeGb: instance.diskGb,
+      created: item['date-sec'] ? new Date(Number(item['date-sec']) * 1000).toISOString() : '—',
+      encryption: 'Host filesystem',
+      status: 'Available',
+    }));
+    res.json(snapshots);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Snapshot listing failed' });
+  }
+});
+
+app.post('/v1/instances/:id/snapshots', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (pidFor(instance)) return res.status(409).json({ error: 'Stop the instance before creating an internal qcow2 snapshot' });
+    const name = String(req.body?.name || '').trim();
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(name)) return res.status(400).json({ error: 'Invalid snapshot name' });
+    run('qemu-img', ['snapshot', '-c', name, instance.diskPath]);
+    res.status(201).json({ success: true, id: `${instance.id}:${name}` });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Snapshot creation failed' });
+  }
+});
+
+app.post('/v1/instances/:id/snapshots/:name/rollback', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (pidFor(instance)) return res.status(409).json({ error: 'Stop the instance before rolling back a snapshot' });
+    const name = String(req.params.name || '');
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(name)) return res.status(400).json({ error: 'Invalid snapshot name' });
+    run('qemu-img', ['snapshot', '-a', name, instance.diskPath]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Snapshot rollback failed' });
+  }
+});
+
+app.listen(port, bind, () => {
+  console.log(`Nova Agent listening on ${bind}:${port}`);
+});

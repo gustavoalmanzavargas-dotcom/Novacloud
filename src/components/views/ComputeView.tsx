@@ -245,7 +245,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       });
       if (!response.ok) throw new Error(await readError(response, 'Snapshot creation failed'));
       setShowCreateSnapModal(false);
-      showToast(`Snapshot "${newSnapName.trim()}" submitted to Proxmox.`);
+      showToast(`Snapshot "${newSnapName.trim()}" submitted to Nova Agent.`);
       setNewSnapName('');
       window.setTimeout(() => loadComputeData(), 2000);
     } catch (error) {
@@ -266,7 +266,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
         body: JSON.stringify({ id: snapshot.id }),
       });
       if (!response.ok) throw new Error(await readError(response, 'Snapshot rollback failed'));
-      showToast(`Rollback of "${snapshot.name}" submitted to Proxmox.`);
+      showToast(`Rollback of "${snapshot.name}" submitted to Nova Agent.`);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Snapshot rollback failed');
     } finally {
@@ -284,7 +284,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       showToast('Enter a valid HTTP or HTTPS URL.');
       return;
     }
-    const requestedName = window.prompt('Filename to save in Proxmox storage:', filename);
+    const requestedName = window.prompt('Filename to save in Nova image storage:', filename);
     if (!requestedName || isWorking) return;
     setIsWorking(true);
     try {
@@ -294,7 +294,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
         body: JSON.stringify({ url, filename: requestedName }),
       });
       if (!response.ok) throw new Error(await readError(response, 'Image import failed'));
-      showToast(`Proxmox started importing "${requestedName}".`);
+      showToast(`Nova Agent started importing "${requestedName}".`);
       window.setTimeout(() => loadComputeData(), 3000);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Image import failed');
@@ -308,12 +308,12 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
     setIsWorking(true);
     try {
       const optionsResponse = await fetch('/api/compute/options');
-      if (!optionsResponse.ok) throw new Error(await readError(optionsResponse, 'Unable to load Proxmox options'));
+      if (!optionsResponse.ok) throw new Error(await readError(optionsResponse, 'Unable to load Nova compute options'));
       const options = await optionsResponse.json();
-      if (!options.configured) throw new Error('Configure the Proxmox provider before creating an instance.');
+      if (!options.configured) throw new Error('Connect a Nova Agent before creating an instance.');
       const name = window.prompt('VM name:');
       if (!name) return;
-      const node = window.prompt('Proxmox node:', options.nodes?.[0] || '');
+      const node = window.prompt('Nova compute host:', options.nodes?.[0] || '');
       if (!node) return;
       const matchingStorage = options.storages?.find((item: any) => item.node === node)?.storage || options.storages?.[0]?.storage || '';
       const storage = window.prompt('VM disk storage:', matchingStorage);
@@ -331,7 +331,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       });
       if (!response.ok) throw new Error(await readError(response, 'VM creation failed'));
       const result = await response.json();
-      showToast(`VM "${result.name}" creation submitted to Proxmox as ID ${result.vmid}.`);
+      showToast(`VM "${result.name}" creation submitted to Nova Agent as ID ${result.vmid}.`);
       window.setTimeout(() => window.location.reload(), 2500);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'VM creation failed');
@@ -1019,7 +1019,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
               Autoscaling instance groups ensure high availability, automatic replacement of unhealthy nodes, and dynamic elasticity.
             </p>
             <button
-              onClick={() => showToast('Autoscaling groups are not supported by the connected Proxmox provider yet.')}
+              onClick={() => showToast('Autoscaling groups are not enabled in Nova Scheduler yet.')}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
