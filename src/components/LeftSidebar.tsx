@@ -266,6 +266,16 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                   isLight ? 'border-slate-200' : 'border-slate-800'
                 }`}
               >
+
+                <button
+                  id="nav-sub-containers-btn"
+                  onClick={() => onNavigate('containers')}
+                  className={`w-full text-left px-2 py-1 text-[11px] rounded transition-colors cursor-pointer ${getSubItemClass(
+                    activeView === 'containers'
+                  )}`}
+                >
+                  Containers
+                </button>
                 <button
                   id="nav-sub-vms-btn"
                   onClick={() => onNavigate('compute', 'vms')}
@@ -327,12 +337,12 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 } else {
                   setAppsOpen(!appsOpen);
                 }
-                onNavigate('applications', 'workloads');
+                onNavigate('containers');
               }}
               className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${getItemClass(
                 activeView === 'containers' || activeView === 'applications'
               )}`}
-              title="Containers & Microservices"
+              title="Containers & Applications"
             >
               <div className="flex items-center gap-3">
                 <Boxes className="w-4 h-4 shrink-0 text-indigo-500" />
