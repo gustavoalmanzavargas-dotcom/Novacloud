@@ -19,6 +19,25 @@ type NovaNetwork = {
   updatedAt: string;
 };
 
+type NovaApplication = {
+  id: string;
+  name: string;
+  sourceType: 'git';
+  repoUrl: string;
+  branch: string;
+  buildCommand: string;
+  startCommand: string;
+  outputDir: string;
+  env: Record<string, string>;
+  port: number;
+  domain: string;
+  workDir: string;
+  unit: string;
+  status: 'Running' | 'Stopped' | 'Failed' | 'Deploying';
+  createdAt: string;
+  updatedAt: string;
+};
+
 type NovaVolume = {
   id: string;
   name: string;
@@ -63,10 +82,12 @@ const imagesDir = path.join(stateDir, 'images');
 const disksDir = path.join(stateDir, 'disks');
 const networksDir = path.join(stateDir, 'networks');
 const volumesDir = path.join(stateDir, 'volumes');
+const appsDir = path.join(stateDir, 'apps');
+const appSourcesDir = path.join(stateDir, 'app-sources');
 const runDir = process.env.NOVA_AGENT_RUN_DIR || '/run/novacloud-agent';
 const defaultBridge = process.env.NOVA_AGENT_BRIDGE || 'novabr0';
 
-for (const dir of [stateDir, instancesDir, imagesDir, disksDir, networksDir, volumesDir, runDir]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [stateDir, instancesDir, imagesDir, disksDir, networksDir, volumesDir, appsDir, appSourcesDir, runDir]) fs.mkdirSync(dir, { recursive: true });
 
 function requireToken(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!token || req.headers.authorization !== `Bearer ${token}`) {
@@ -694,6 +715,154 @@ app.delete('/v1/volumes/:id', (req, res) => {
     res.status(204).end();
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Volume deletion failed' });
+  }
+});
+
+function applicationFile(id: string) {
+  return jsonFile(appsDir, id);
+}
+
+function applicationStatus(appState: NovaApplication): NovaApplication {
+  const status = spawnSync('systemctl', ['is-active', '--quiet', appState.unit], { stdio: 'ignore' }).status === 0
+    ? 'Running'
+    : spawnSync('systemctl', ['is-failed', '--quiet', appState.unit], { stdio: 'ignore' }).status === 0
+      ? 'Failed'
+      : 'Stopped';
+  return { ...appState, status };
+}
+
+function parseEnvText(value: unknown) {
+  const result: Record<string, string> = {};
+  for (const line of String(value || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const split = trimmed.indexOf('=');
+    if (split < 1) continue;
+    const key = trimmed.slice(0, split).trim();
+    const val = trimmed.slice(split + 1);
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) result[key] = val;
+  }
+  return result;
+}
+
+function nextApplicationPort() {
+  const used = new Set(listJson<NovaApplication>(appsDir).map((item) => Number(item.port)));
+  for (let port = 31000; port <= 31999; port += 1) if (!used.has(port)) return port;
+  throw new Error('No Nova application ports are available');
+}
+
+function deployApplication(input: any, existing?: NovaApplication) {
+  const name = String(input?.name || existing?.name || '').trim();
+  const repoUrl = String(input?.repoUrl || existing?.repoUrl || '').trim();
+  const branch = String(input?.branch || existing?.branch || 'main').trim();
+  const buildCommand = String(input?.buildCommand || existing?.buildCommand || 'npm run build').trim();
+  const startCommand = String(input?.startCommand || existing?.startCommand || 'npm start').trim();
+  const outputDir = String(input?.outputDir || existing?.outputDir || 'dist').trim();
+  const domain = String(input?.domain || existing?.domain || '').trim();
+  const env = input?.env && typeof input.env === 'object' ? input.env : (existing?.env || parseEnvText(input?.envVars));
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) throw new Error('A valid application name is required');
+  if (!/^https?:\/\//i.test(repoUrl) && !/^git@/i.test(repoUrl)) throw new Error('A valid Git repository URL is required');
+  if (!commandExists('git')) throw new Error('Git is not installed on this Nova host');
+
+  const id = existing?.id || crypto.randomUUID();
+  const workDir = existing?.workDir || path.join(appSourcesDir, id);
+  const unit = existing?.unit || `nova-app-${id.replace(/-/g, '').slice(0, 16)}.service`;
+  const appPort = existing?.port || nextApplicationPort();
+
+  if (!existing) {
+    run('git', ['clone', '--depth', '1', '--branch', branch, repoUrl, workDir], 120000);
+  } else {
+    run('git', ['-C', workDir, 'fetch', '--depth', '1', 'origin', branch], 120000);
+    run('git', ['-C', workDir, 'reset', '--hard', `origin/${branch}`], 30000);
+  }
+
+  if (fs.existsSync(path.join(workDir, 'package.json'))) {
+    if (commandExists('npm')) run('npm', ['install'], 180000);
+    else throw new Error('npm is required for this application');
+  }
+
+  if (buildCommand && buildCommand !== 'none') {
+    const built = spawnSync('/bin/bash', ['-lc', buildCommand], {
+      cwd: workDir,
+      env: { ...process.env, ...env, PORT: String(appPort) },
+      encoding: 'utf8',
+      timeout: 300000,
+    });
+    if (built.error) throw built.error;
+    if (built.status !== 0) throw new Error((built.stderr || built.stdout || 'Application build failed').trim());
+  }
+
+  spawnSync('systemctl', ['stop', unit], { stdio: 'ignore' });
+  spawnSync('systemctl', ['reset-failed', unit], { stdio: 'ignore' });
+
+  const envArgs = Object.entries({ ...env, PORT: String(appPort) })
+    .flatMap(([key, value]) => ['--setenv', `${key}=${value}`]);
+  const result = spawnSync('systemd-run', [
+    '--unit', unit.replace(/\.service$/, ''),
+    '--property', `WorkingDirectory=${workDir}`,
+    '--property', 'Restart=always',
+    '--property', 'RestartSec=3',
+    ...envArgs,
+    '/bin/bash', '-lc', startCommand,
+  ], { encoding: 'utf8', timeout: 30000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error((result.stderr || result.stdout || 'Unable to start application').trim());
+
+  const state: NovaApplication = {
+    id, name, sourceType: 'git', repoUrl, branch, buildCommand, startCommand, outputDir,
+    env, port: appPort, domain, workDir, unit, status: 'Running',
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  saveJson(applicationFile(id), state);
+  return applicationStatus(state);
+}
+
+app.get('/v1/apps', (_req, res) => {
+  res.json(listJson<NovaApplication>(appsDir).map(applicationStatus));
+});
+
+app.post('/v1/apps', (req, res) => {
+  try {
+    if (String(req.body?.sourceType || 'git') !== 'git') {
+      return res.status(400).json({ error: 'Nova application runtime currently supports Git deployments on this host' });
+    }
+    const appState = deployApplication(req.body);
+    res.status(201).json(appState);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Application deployment failed' });
+  }
+});
+
+app.post('/v1/apps/:id/redeploy', (req, res) => {
+  try {
+    const current = readJson<NovaApplication>(applicationFile(req.params.id));
+    res.json(deployApplication(req.body || {}, current));
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Application redeploy failed' });
+  }
+});
+
+app.post('/v1/apps/:id/action', (req, res) => {
+  try {
+    const current = readJson<NovaApplication>(applicationFile(req.params.id));
+    const action = String(req.body?.action || '');
+    if (!['start', 'stop', 'restart'].includes(action)) return res.status(400).json({ error: 'Unsupported application action' });
+    run('systemctl', [action, current.unit], 30000);
+    res.json(applicationStatus(current));
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Application action failed' });
+  }
+});
+
+app.get('/v1/apps/:id/logs', (req, res) => {
+  try {
+    const current = readJson<NovaApplication>(applicationFile(req.params.id));
+    const output = spawnSync('journalctl', ['-u', current.unit, '-n', '200', '--no-pager', '-o', 'cat'], { encoding: 'utf8', timeout: 30000 });
+    res.json({ logs: (output.stdout || output.stderr || '').split(/\r?\n/).filter(Boolean) });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to read application logs' });
   }
 });
 

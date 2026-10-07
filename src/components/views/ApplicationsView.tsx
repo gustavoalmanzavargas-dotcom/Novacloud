@@ -94,14 +94,84 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const handleRedeploy = (_appId: string, _appName: string) => {
-    showToast('Redeploy is disabled until a real application provider is connected.');
+  const normalizeApplication = (app: any): ApplicationItem => ({
+    id: String(app.id),
+    name: String(app.name || 'Nova Application'),
+    status: app.status === 'Running' ? 'Running' : app.status === 'Failed' ? 'Failed' : app.status === 'Deploying' ? 'Deploying' : 'Degraded',
+    domain: app.domain || '',
+    url: app.domain ? `https://${app.domain}` : app.port ? `http://127.0.0.1:${app.port}` : '',
+    infrastructure: 'Nova Agent',
+    lastDeployment: app.updatedAt || new Date().toISOString(),
+    lastDeploy: app.updatedAt || new Date().toISOString(),
+    health: app.status === 'Running' ? 'Healthy' : app.status === 'Failed' ? 'Failed' : 'Degraded',
+    replicas: 1,
+    cpuUsagePct: 0,
+    memUsageMb: 0,
+    gitBranch: app.branch || 'main',
+    branch: app.branch || 'main',
+    port: Number(app.port || 0),
+    type: 'Git Application',
+  });
+
+  const handleRedeploy = async (appId: string, appName: string) => {
+    if (redeployingId) return;
+    setRedeployingId(appId);
+    try {
+      const response = await fetch(`/api/applications/${encodeURIComponent(appId)}/redeploy`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Redeploy failed');
+      setApps((current) => current.map((app) => app.id === appId ? normalizeApplication(body) : app));
+      showToast(`${appName} redeployed successfully.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Redeploy failed');
+    } finally {
+      setRedeployingId(null);
+    }
   };
 
-  const startDeploymentSimulation = () => {
-    setDeployStatus('idle');
-    setLogs([]);
-    showToast('Deployment is disabled until a real application provider is connected.');
+  const startDeploymentSimulation = async () => {
+    if (sourceType !== 'git') {
+      showToast('This Nova host currently supports Git application deployments. Choose Git Repository.');
+      return;
+    }
+    if (!repoUrl.trim()) {
+      showToast('Repository URL is required.');
+      return;
+    }
+    setDeployStatus('building');
+    setLogs(['Submitting deployment to Nova Agent…']);
+    const repoName = repoUrl.split('/').pop()?.replace(/\.git$/i, '') || 'nova-app';
+    const appName = (domainName.trim().split('.')[0] || repoName).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 63);
+    try {
+      const response = await fetch('/api/applications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: appName,
+          sourceType: 'git',
+          repoUrl: repoUrl.trim(),
+          branch: branch.trim() || 'main',
+          buildCommand: buildCommand.trim() || 'npm run build',
+          startCommand: 'npm start',
+          outputDir: outputDir.trim() || 'dist',
+          envVars,
+          domain: domainName.trim(),
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Application deployment failed');
+      const app = normalizeApplication(body);
+      setApps((current) => [app, ...current.filter((item) => item.id !== app.id)]);
+      const logsResponse = await fetch(`/api/applications/${encodeURIComponent(app.id)}/logs`);
+      const logsBody = await logsResponse.json().catch(() => ({}));
+      setLogs(Array.isArray(logsBody?.logs) ? logsBody.logs : ['Deployment completed.']);
+      setDeployStatus('deployed');
+      showToast(`${app.name} is running on Nova.`);
+    } catch (error) {
+      setLogs((current) => [...current, error instanceof Error ? error.message : 'Application deployment failed']);
+      setDeployStatus('idle');
+      showToast(error instanceof Error ? error.message : 'Application deployment failed');
+    }
   };
 
   return (
@@ -330,7 +400,8 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
                   </div>
 
                   <div
-                    onClick={() => setSourceType('container')}
+                    title="Container runtime is not enabled on this Nova host yet."
+                    onClick={() => showToast('Container image deployment is not enabled on this Nova host yet. Use Git Repository.')}
                     className={`p-4 rounded-lg border cursor-pointer transition-all ${
                       sourceType === 'container'
                         ? 'bg-cyan-500/15 border-cyan-500 shadow-xs'
@@ -347,7 +418,8 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
                   </div>
 
                   <div
-                    onClick={() => setSourceType('template')}
+                    title="Application templates are not enabled yet."
+                    onClick={() => showToast('Application templates are not enabled yet. Use Git Repository.')}
                     className={`p-4 rounded-lg border cursor-pointer transition-all ${
                       sourceType === 'template'
                         ? 'bg-cyan-500/15 border-cyan-500 shadow-xs'
@@ -413,7 +485,7 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
                   }`}
                 >
                   <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                  <span>Detected Framework: <strong>Node.js / React 19 (Vite)</strong></span>
+                  <span>Nova will inspect the repository on the compute host and run the build command you specify.</span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -524,7 +596,7 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
                     />
                   </div>
                   <div className="text-[11px] text-emerald-600 flex items-center gap-1 mt-1 font-mono">
-                    <Lock className="w-3 h-3" /> Automatic wildcard SSL (Let's Encrypt / Cyverax Edge) enabled.
+                    <Lock className="w-3 h-3" /> Domain routing/automatic TLS is only applied when configured on the Nova host.
                   </div>
                 </div>
 
@@ -545,12 +617,12 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
                   </div>
                   <div>
                     <label className={`text-xs block mb-1 font-medium ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
-                      VPC Network
+                      Nova Network
                     </label>
                     <input
                       type="text"
                       disabled
-                      value="vpc-atl-prod-01 (10.15.0.0/16)"
+                      value="Nova host application network"
                       className={`w-full rounded px-3 py-2 text-xs font-mono border ${
                         isLight
                           ? 'bg-slate-100 border-slate-300 text-slate-600'
@@ -582,7 +654,7 @@ export const ApplicationsView: React.FC<ApplicationsViewProps> = ({
                     }`}
                   />
                   <span className={`text-[11px] font-mono ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                    ALB probes every 15s. Expected HTTP 200.
+                    Health probing is performed by the application process and Nova service state.
                   </span>
                 </div>
 

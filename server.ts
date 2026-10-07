@@ -6,10 +6,11 @@ import pg from 'pg';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { novaAgentConfigured, novaAgentRequest, novaAgentUpload } from './server/novaAgentClient';
 
 dotenv.config();
@@ -50,12 +51,13 @@ async function syncNovaAgentInventory() {
   if (!novaAgentConfigured()) return;
   if (novaSyncInFlight) return novaSyncInFlight;
   novaSyncInFlight = (async () => {
-  const [host, instances, images, networks, volumes] = await Promise.all([
+  const [host, instances, images, networks, volumes, apps] = await Promise.all([
     novaAgentRequest('/v1/host'),
     novaAgentRequest('/v1/instances'),
     novaAgentRequest('/v1/images'),
     novaAgentRequest('/v1/networks'),
     novaAgentRequest('/v1/volumes'),
+    novaAgentRequest('/v1/apps'),
   ]);
 
   const hostResult = await pool.query(
@@ -183,12 +185,52 @@ async function syncNovaAgentInventory() {
     await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'storage'`);
   }
 
+  const appIds: string[] = [];
+  for (const appState of Array.isArray(apps) ? apps : []) {
+    appIds.push(appState.id);
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('application', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [appState.id, {
+        id: appState.id,
+        name: appState.name,
+        status: appState.status,
+        domain: appState.domain || '',
+        url: appState.domain ? `https://${appState.domain}` : `http://127.0.0.1:${appState.port}`,
+        infrastructure: 'Nova Agent',
+        lastDeployment: appState.updatedAt,
+        lastDeploy: appState.updatedAt,
+        health: appState.status === 'Running' ? 'Healthy' : appState.status === 'Failed' ? 'Failed' : 'Degraded',
+        replicas: 1,
+        cpuUsagePct: 0,
+        memUsageMb: 0,
+        gitBranch: appState.branch,
+        branch: appState.branch,
+        port: appState.port,
+        type: 'Git Application',
+        repoUrl: appState.repoUrl,
+      }],
+    );
+  }
+  if (appIds.length) {
+    await pool.query(
+      `DELETE FROM resources WHERE provider = 'nova-native' AND type = 'application'
+       AND NOT (external_id = ANY($1::text[]))`,
+      [appIds],
+    );
+  } else {
+    await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'application'`);
+  }
+
   publishNovaEvent('resource-sync', {
     hostId: host.id,
     instances: instanceIds.length,
     images: Array.isArray(images) ? images.length : 0,
     networks: networkIds.length,
     volumes: volumeIds.length,
+    applications: appIds.length,
     timestamp: new Date().toISOString(),
   });
   })().finally(() => {
@@ -882,6 +924,248 @@ app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
   }
 });
 
+function safeDatabaseName(value: string) {
+  const cleaned = value.trim();
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,47}$/.test(cleaned)) throw new Error('Database name must start with a letter and contain only letters, numbers, underscores, or hyphens');
+  return cleaned;
+}
+
+function quoteIdentifier(value: string) {
+  return '"' + value.replace(/"/g, '""') + '"';
+}
+
+function databaseSchemaFor(id: string) {
+  return `nova_db_${id.replace(/-/g, '').slice(0, 24)}`;
+}
+
+function databaseRecord(row: any) {
+  return {
+    id: row.id,
+    ...row.data,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+app.get('/api/databases', requireAuth, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT id, data, created_at, updated_at
+       FROM resources WHERE type = 'database' AND provider = 'nova-native'
+       ORDER BY created_at DESC`,
+  );
+  res.json(result.rows.map(databaseRecord));
+});
+
+app.post('/api/databases', requireAuth, async (req, res) => {
+  try {
+    const name = safeDatabaseName(String(req.body?.name || ''));
+    const engine = String(req.body?.engine || 'PostgreSQL 16');
+    if (!engine.startsWith('PostgreSQL')) return res.status(400).json({ error: 'This Nova build currently supports PostgreSQL databases.' });
+    const id = crypto.randomUUID();
+    const schema = databaseSchemaFor(id);
+    await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+    const serverVersion = await pool.query('SHOW server_version');
+    const data = {
+      id,
+      name,
+      engine: 'PostgreSQL',
+      version: String(serverVersion.rows[0]?.server_version || 'PostgreSQL'),
+      status: 'Running',
+      cpuUsagePct: 0,
+      storageUsedGb: 0,
+      storageTotalGb: 20,
+      connections: 0,
+      maxConnections: 100,
+      replication: 'Single Node',
+      backups: 'Manual snapshots',
+      endpoint: '127.0.0.1',
+      port: 5432,
+      environment: 'Production',
+      region: 'local',
+      schema,
+    };
+    const saved = await pool.query(
+      `INSERT INTO resources (id, type, provider, external_id, data)
+       VALUES ($1, 'database', 'nova-native', $2, $3)
+       RETURNING id, data, created_at, updated_at`,
+      [id, `database:${id}`, data],
+    );
+    await pool.query(
+      `INSERT INTO activity_events (actor, action, resource, status)
+       VALUES ($1, 'database.create', $2, 'SUCCESS')`,
+      [String(req.session.userId || 'user'), id],
+    );
+    res.status(201).json(databaseRecord(saved.rows[0]));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Database creation failed' });
+  }
+});
+
+app.post('/api/databases/:id/query', requireAuth, async (req, res) => {
+  const db = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'database' AND provider = 'nova-native' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!db.rows[0]) return res.status(404).json({ error: 'Nova database not found' });
+  const sql = String(req.body?.sql || '').trim();
+  if (!sql) return res.status(400).json({ error: 'SQL query is required' });
+  if (sql.length > 100000) return res.status(400).json({ error: 'SQL query is too large' });
+
+  const schema = String(db.rows[0].data?.schema || '');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL search_path TO ${quoteIdentifier(schema)}, public`);
+    await client.query(`SET LOCAL statement_timeout = '15s'`);
+    const result = await client.query(sql);
+    await client.query('COMMIT');
+    res.json({
+      command: result.command,
+      rowCount: result.rowCount,
+      fields: result.fields?.map((field: any) => field.name) || [],
+      rows: Array.isArray(result.rows) ? result.rows.slice(0, 1000) : [],
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    res.status(400).json({ error: error instanceof Error ? error.message : 'SQL execution failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/databases/:id/snapshots', requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, data, created_at FROM resources
+       WHERE type = 'database-snapshot' AND provider = 'nova-native'
+         AND data->>'databaseId' = $1
+       ORDER BY created_at DESC`,
+    [req.params.id],
+  );
+  res.json(result.rows.map((row: any) => ({ id: row.id, ...row.data, createdAt: row.created_at })));
+});
+
+app.post('/api/databases/:id/snapshots', requireAuth, async (req, res) => {
+  const db = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'database' AND provider = 'nova-native' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!db.rows[0]) return res.status(404).json({ error: 'Nova database not found' });
+  const schema = String(db.rows[0].data?.schema || '');
+  const snapshotName = String(req.body?.name || `${db.rows[0].data?.name}-${Date.now()}`).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 80);
+  const backupDir = path.join(process.cwd(), 'data', 'database-snapshots');
+  fs.mkdirSync(backupDir, { recursive: true });
+  const filename = `${req.params.id}-${Date.now()}.sql`;
+  const filePath = path.join(backupDir, filename);
+  try {
+    const dbUrl = new URL(String(process.env.DATABASE_URL));
+    const args = [
+      '--host', dbUrl.hostname,
+      '--port', dbUrl.port || '5432',
+      '--username', decodeURIComponent(dbUrl.username),
+      '--dbname', decodeURIComponent(dbUrl.pathname.replace(/^\//, '')),
+      '--schema', schema,
+      '--no-owner',
+      '--no-privileges',
+      '--file', filePath,
+    ];
+    const dump = spawnSync('pg_dump', args, {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: { ...process.env, PGPASSWORD: decodeURIComponent(dbUrl.password || '') },
+    });
+    if (dump.error) throw dump.error;
+    if (dump.status !== 0) throw new Error((dump.stderr || dump.stdout || 'pg_dump failed').trim());
+    const stat = fs.statSync(filePath);
+    const data = {
+      databaseId: req.params.id,
+      databaseName: db.rows[0].data?.name,
+      name: snapshotName,
+      filePath,
+      sizeBytes: stat.size,
+      status: 'Available',
+    };
+    const saved = await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('database-snapshot', 'nova-native', $1, $2)
+       RETURNING id, data, created_at`,
+      [`database-snapshot:${req.params.id}:${Date.now()}`, data],
+    );
+    res.status(201).json({ id: saved.rows[0].id, ...saved.rows[0].data, createdAt: saved.rows[0].created_at });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Database snapshot failed' });
+  }
+});
+
+app.get('/api/applications', requireAuth, async (_req, res) => {
+  try {
+    res.json(await novaAgentRequest('/v1/apps'));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Nova applications' });
+  }
+});
+
+app.post('/api/applications', requireAuth, async (req, res) => {
+  const payload = {
+    name: String(req.body?.name || '').trim(),
+    sourceType: String(req.body?.sourceType || 'git'),
+    repoUrl: String(req.body?.repoUrl || '').trim(),
+    branch: String(req.body?.branch || 'main').trim(),
+    buildCommand: String(req.body?.buildCommand || 'npm run build').trim(),
+    startCommand: String(req.body?.startCommand || 'npm start').trim(),
+    outputDir: String(req.body?.outputDir || 'dist').trim(),
+    envVars: String(req.body?.envVars || ''),
+    domain: String(req.body?.domain || '').trim(),
+  };
+  const jobId = await createJob('application.deploy', req.session.userId, 'application', null, payload);
+  try {
+    const appState = await novaAgentRequest('/v1/apps', 'POST', payload);
+    await finishJob(jobId, 'succeeded', appState);
+    await syncNovaAgentInventory();
+    res.status(201).json({ ...appState, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Application deployment failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.post('/api/applications/:id/redeploy', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const jobId = await createJob('application.redeploy', req.session.userId, 'application', id, {});
+  try {
+    const appState = await novaAgentRequest(`/v1/apps/${encodeURIComponent(id)}/redeploy`, 'POST', {});
+    await finishJob(jobId, 'succeeded', appState);
+    await syncNovaAgentInventory();
+    res.json({ ...appState, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Application redeploy failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.post('/api/applications/:id/action', requireAuth, async (req, res) => {
+  try {
+    const appState = await novaAgentRequest(
+      `/v1/apps/${encodeURIComponent(req.params.id)}/action`,
+      'POST',
+      { action: String(req.body?.action || '') },
+    );
+    await syncNovaAgentInventory();
+    res.json(appState);
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Application action failed' });
+  }
+});
+
+app.get('/api/applications/:id/logs', requireAuth, async (req, res) => {
+  try {
+    res.json(await novaAgentRequest(`/v1/apps/${encodeURIComponent(req.params.id)}/logs`));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load application logs' });
+  }
+});
+
 app.get('/api/networking/vpcs', requireAuth, async (_req, res) => {
   try {
     res.json(await novaAgentRequest('/v1/networks'));
@@ -1105,6 +1389,60 @@ app.get('/api/iam/users', requireAuth, async (_req, res) => {
        FROM users ORDER BY created_at ASC`
   );
   res.json(result.rows);
+});
+
+app.post('/api/iam/users', requireAdmin, async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const displayName = String(req.body?.displayName || '').trim();
+  const requestedRole = String(req.body?.role || 'operator');
+  const role = ['admin', 'operator', 'viewer'].includes(requestedRole) ? requestedRole : 'operator';
+  if (!displayName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'A valid display name and email are required' });
+  }
+  const tempPassword = crypto.randomBytes(18).toString('base64url');
+  const passwordHash = await bcrypt.hash(tempPassword, 12);
+  try {
+    const result = await pool.query(
+      `INSERT INTO users (email, display_name, password_hash, role, active)
+       VALUES ($1, $2, $3, $4, TRUE)
+       RETURNING id, email, display_name AS "displayName", role, active,
+                 created_at AS "createdAt", last_login_at AS "lastLoginAt"`,
+      [email, displayName, passwordHash, role],
+    );
+    await pool.query(
+      `INSERT INTO activity_events (actor, action, resource, status)
+       VALUES ($1, 'iam.user.create', $2, 'SUCCESS')`,
+      [String(req.session.userId || 'user'), result.rows[0].id],
+    );
+    res.status(201).json({ ...result.rows[0], temporaryPassword: tempPassword });
+  } catch (error: any) {
+    if (error?.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to create user' });
+  }
+});
+
+app.patch('/api/iam/users/:id', requireAdmin, async (req, res) => {
+  const role = req.body?.role ? String(req.body.role) : undefined;
+  const active = typeof req.body?.active === 'boolean' ? req.body.active : undefined;
+  if (role && !['admin', 'operator', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  const current = await pool.query('SELECT id, role, active FROM users WHERE id = $1', [req.params.id]);
+  if (!current.rows[0]) return res.status(404).json({ error: 'User not found' });
+  const result = await pool.query(
+    `UPDATE users SET role = $2, active = $3 WHERE id = $1
+     RETURNING id, email, display_name AS "displayName", role, active,
+               created_at AS "createdAt", last_login_at AS "lastLoginAt"`,
+    [req.params.id, role || current.rows[0].role, active ?? current.rows[0].active],
+  );
+  res.json(result.rows[0]);
+});
+
+app.post('/api/security/remediate/:id', requireAdmin, async (req, res) => {
+  const finding = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'security_alert' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!finding.rows[0]) return res.status(404).json({ error: 'Security finding not found' });
+  res.status(409).json({ error: 'This finding does not have an automated Nova remediation handler. No changes were applied.' });
 });
 
 app.get('/api/resources', requireAuth, async (req, res) => {

@@ -40,13 +40,23 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserRole, setNewUserRole] = useState('Developer');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [userCount, setUserCount] = useState(12);
+  const [userCount, setUserCount] = useState(0);
 
   useEffect(() => {
     if (activeSubTab && (activeSubTab === 'overview' || activeSubTab === 'vulnerabilities' || activeSubTab === 'compliance')) {
       setActiveTab(activeSubTab);
     }
   }, [activeSubTab]);
+
+  useEffect(() => {
+    fetch('/api/iam/users')
+      .then(async (response) => {
+        const body = await response.json().catch(() => ([]));
+        if (!response.ok) throw new Error(body?.error || 'Unable to load IAM users');
+        setUserCount(Array.isArray(body) ? body.filter((user: any) => user.active).length : 0);
+      })
+      .catch(() => setUserCount(0));
+  }, []);
 
   const handleTabSwitch = (tab: 'overview' | 'vulnerabilities' | 'compliance') => {
     setActiveTab(tab);
@@ -61,26 +71,64 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const handleRemediate = (alertId: string) => {
-    setAlerts((prev) =>
-      (prev || []).map((a) => {
-        if (a.id === alertId) {
-          showToast(`Automated remediation successfully applied for ${a.title}`);
-          return { ...a, status: 'Remediated' };
-        }
-        return a;
-      })
-    );
+  const handleRemediate = async (alertId: string) => {
+    try {
+      const response = await fetch(`/api/security/remediate/${encodeURIComponent(alertId)}`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Remediation failed');
+      setAlerts((prev) => (prev || []).map((alert) => alert.id === alertId ? { ...alert, status: 'Remediated' } : alert));
+      showToast('Nova remediation completed.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Remediation failed');
+    }
   };
 
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUserName.trim()) return;
-    setUserCount((c) => c + 1);
-    setIsAddUserModalOpen(false);
-    showToast(`IAM Principal ${newUserName} (${newUserRole}) provisioned with zero-trust credentials.`);
-    setNewUserName('');
-    setNewUserEmail('');
+    if (!newUserName.trim() || !newUserEmail.trim()) return;
+    const roleMap: Record<string, string> = {
+      Administrator: 'admin',
+      Developer: 'operator',
+      SecurityAuditor: 'viewer',
+      DatabaseOperator: 'operator',
+    };
+    try {
+      const response = await fetch('/api/iam/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          displayName: newUserName.trim(),
+          email: newUserEmail.trim(),
+          role: roleMap[newUserRole] || 'operator',
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Unable to create IAM user');
+      setUserCount((count) => count + 1);
+      setIsAddUserModalOpen(false);
+      showToast(`IAM user created. Temporary password: ${body.temporaryPassword}`);
+      setNewUserName('');
+      setNewUserEmail('');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to create IAM user');
+    }
+  };
+
+  const handleExportAudit = () => {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      users: userCount,
+      findings: safeAlerts,
+      note: 'Nova-generated operational audit export. Compliance certification is not implied.',
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = href;
+    anchor.download = `nova-audit-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(href);
+    showToast('Audit JSON exported.');
   };
 
   const activeVulnerabilities = safeAlerts.filter((a) => a.status !== 'Remediated').length;
@@ -216,7 +264,7 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                 {Math.min(100, postureScore)} / 100
               </div>
               <div className={`text-[10px] font-mono mt-0.5 ${isLight ? 'text-slate-500' : 'text-slate-500'}`}>
-                SOC 2 Type II Compliant
+                Live Nova data only
               </div>
             </div>
 
@@ -242,7 +290,7 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                 {userCount} Users
               </div>
               <div className={`text-[10px] font-mono mt-0.5 ${isLight ? 'text-slate-500' : 'text-slate-500'}`}>
-                4 Service Accounts
+                Accounts in Nova PostgreSQL
               </div>
             </div>
 
@@ -252,8 +300,8 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
               }`}
             >
               <div className={`text-xs ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>TLS Certificates</div>
-              <div className="text-xl font-bold font-mono text-cyan-500 mt-1">6 Active</div>
-              <div className="text-[10px] text-emerald-500 font-mono mt-0.5">Auto-Renewal Active</div>
+              <div className="text-xl font-bold font-mono text-cyan-500 mt-1">Not assessed</div>
+              <div className="text-[10px] text-emerald-500 font-mono mt-0.5">Certificate inventory not connected</div>
             </div>
           </div>
 
@@ -388,26 +436,26 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
                 Regulatory Compliance & CIS Benchmarking
               </h2>
               <p className={`text-xs mt-0.5 ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
-                Continuous automated audit evidence collection against global security standards.
+                Nova security inventory. Formal compliance status is not claimed until evidence collection and certification integrations are implemented.
               </p>
             </div>
             <button
-              onClick={() => showToast('Audit PDF bundle generated and downloaded successfully.')}
+              onClick={handleExportAudit}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export Audit Package</span>
+              <span>Export Audit JSON</span>
             </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {[
-              { framework: 'SOC 2 Type II', status: 'Compliant', passed: '142 / 145 Controls', renewed: 'Valid thru Jan 2026', badge: 'Certified' },
-              { framework: 'ISO / IEC 27001', status: 'Certified', passed: '114 / 114 Controls', renewed: 'Audited Nov 2024', badge: 'ISMS Active' },
-              { framework: 'HIPAA Security Rule', status: 'Passing', passed: '42 / 42 Safeguards', renewed: 'BAA In Effect', badge: 'ePHI Shielded' },
-              { framework: 'PCI-DSS v4.0', status: 'Level 1 Service', passed: '12 / 12 Requirements', renewed: 'AOC Signed 2025', badge: 'SAQ-D Verified' },
-              { framework: 'CIS Cloud Benchmark v2.0', status: 'Passing (94%)', passed: '148 / 156 Checks', renewed: 'Scanned 1 hr ago', badge: 'Continuous' },
-              { framework: 'GDPR / CCPA Privacy', status: 'Compliant', passed: 'DPA Enforced', renewed: 'EU Data Boundary', badge: 'Enforced' },
+              { framework: 'SOC 2 Type II', status: 'Not assessed', passed: 'Evidence integration required', renewed: '—', badge: 'Pending' },
+              { framework: 'ISO / IEC 27001', status: 'Not assessed', passed: 'Evidence integration required', renewed: '—', badge: 'Pending' },
+              { framework: 'HIPAA Security Rule', status: 'Not assessed', passed: 'Evidence integration required', renewed: '—', badge: 'Pending' },
+              { framework: 'PCI-DSS v4.0', status: 'Not assessed', passed: 'Evidence integration required', renewed: '—', badge: 'Pending' },
+              { framework: 'CIS Benchmark', status: 'Not assessed', passed: 'Scanner not enabled', renewed: '—', badge: 'Pending' },
+              { framework: 'GDPR / CCPA Privacy', status: 'Not assessed', passed: 'Policy review required', renewed: '—', badge: 'Pending' },
             ].map((c, i) => (
               <div
                 key={i}
