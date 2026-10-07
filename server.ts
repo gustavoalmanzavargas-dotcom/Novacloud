@@ -30,9 +30,24 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const novaAgentUrl = String(process.env.NOVA_AGENT_URL || 'http://127.0.0.1:9443');
+let novaSyncInFlight: Promise<void> | null = null;
+const eventClients = new Set<Response>();
+
+function publishNovaEvent(event: string, data: unknown) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of eventClients) {
+    try {
+      client.write(payload);
+    } catch {
+      eventClients.delete(client);
+    }
+  }
+}
 
 async function syncNovaAgentInventory() {
   if (!novaAgentConfigured()) return;
+  if (novaSyncInFlight) return novaSyncInFlight;
+  novaSyncInFlight = (async () => {
   const [host, instances, images] = await Promise.all([
     novaAgentRequest('/v1/host'),
     novaAgentRequest('/v1/instances'),
@@ -115,6 +130,17 @@ async function syncNovaAgentInventory() {
       [image.id, image],
     );
   }
+
+  publishNovaEvent('resource-sync', {
+    hostId: host.id,
+    instances: instanceIds.length,
+    images: Array.isArray(images) ? images.length : 0,
+    timestamp: new Date().toISOString(),
+  });
+  })().finally(() => {
+    novaSyncInFlight = null;
+  });
+  return novaSyncInFlight;
 }
 
 async function createJob(kind: string, userId: string | undefined, resourceType: string | null, resourceId: string | null, input: any) {
@@ -134,6 +160,7 @@ async function finishJob(id: string, status: 'succeeded' | 'failed', output: any
      WHERE id = $1`,
     [id, status, output || {}, error || null],
   );
+  publishNovaEvent('job-update', { id, status, output: output || {}, error: error || null });
 }
 
 app.set('trust proxy', 1);
@@ -199,6 +226,47 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (!req.session.userId) return res.status(401).json({ error: 'Authentication required' });
   next();
 }
+
+app.get('/api/events', requireAuth, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  res.write(`event: connected\ndata: ${JSON.stringify({ timestamp: new Date().toISOString() })}\n\n`);
+  eventClients.add(res);
+  const heartbeat = setInterval(() => {
+    try { res.write(`: heartbeat ${Date.now()}\n\n`); } catch {}
+  }, 15000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    eventClients.delete(res);
+  });
+});
+
+app.get('/api/jobs', requireAuth, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
+  const result = await pool.query(
+    `SELECT j.id, j.kind, j.resource_type AS "resourceType", j.resource_id AS "resourceId",
+            j.status, j.input, j.output, j.error, j.created_at AS "createdAt",
+            j.started_at AS "startedAt", j.finished_at AS "finishedAt",
+            u.email AS "requestedBy"
+       FROM jobs j
+       LEFT JOIN users u ON u.id = j.requested_by
+       ORDER BY j.created_at DESC
+       LIMIT $1`,
+    [limit],
+  );
+  res.json(result.rows);
+});
+
+app.get('/api/hosts', requireAuth, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT id, agent_id AS "agentId", name, endpoint, status, capabilities, telemetry,
+            last_seen_at AS "lastSeenAt", created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM nova_hosts ORDER BY name ASC`,
+  );
+  res.json(result.rows);
+});
 
 app.get('/api/nova/host', requireAuth, async (_req, res) => {
   try {
@@ -560,7 +628,15 @@ async function startServer() {
     app.use(express.static(distPath));
     app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
-  app.listen(port, '127.0.0.1', () => console.log(`Cyverax Nova listening on http://127.0.0.1:${port}`));
+  app.listen(port, '127.0.0.1', () => {
+    console.log(`Cyverax Nova listening on http://127.0.0.1:${port}`);
+    if (novaAgentConfigured()) {
+      syncNovaAgentInventory().catch((error) => console.error('Initial Nova Agent sync failed', error));
+      setInterval(() => {
+        syncNovaAgentInventory().catch((error) => console.error('Nova Agent sync failed', error));
+      }, 5000);
+    }
+  });
 }
 
 startServer().catch((error) => {
