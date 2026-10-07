@@ -95,26 +95,90 @@ export const StorageView: React.FC<StorageViewProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  const fetchVolumes = async () => {
+    try {
+      const response = await fetch('/api/storage/volumes');
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error || 'Unable to load Nova volumes');
+      }
+      const data = await response.json();
+      setVolumes((Array.isArray(data) ? data : []).map((volume: any) => ({
+        id: volume.id,
+        name: volume.name,
+        sizeGb: Number(volume.sizeGb || 0),
+        iops: 0,
+        throughput: 'Host-backed qcow2',
+        attachedTo: volume.attachedTo || '—',
+        mountPoint: '—',
+        zone: 'Local Nova Host',
+        status: volume.status === 'In-Use' ? 'In-Use' : 'Available',
+      })));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to load Nova volumes');
+    }
+  };
+
+  useEffect(() => {
+    if (currentTab === 'volumes') fetchVolumes();
+  }, [currentTab]);
+
   const handleCreateStorage = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newStorageName.trim()) return;
-    const newItem: StorageItem = {
-      id: `stor-${Date.now().toString().slice(-4)}`,
-      name: newStorageName,
-      type: newStorageType,
-      region: newStorageRegion,
-      capacityGb: 5000,
-      usedGb: 4,
-      objectsCount: 1,
-    };
-    setStorageItems((prev) => [newItem, ...prev]);
-    setIsCreateOpen(false);
-    showToast(`Storage ${newStorageName} (${newStorageType}) provisioned with KMS AES-256.`);
-    setNewStorageName('');
+    showToast('Nova object storage is not enabled yet. No bucket was created.');
+  };
+
+  const handleCreateVolume = async () => {
+    const name = window.prompt('Nova volume name:');
+    if (!name) return;
+    const sizeGb = Number(window.prompt('Volume size in GiB:', '20') || '20');
+    if (!Number.isFinite(sizeGb) || sizeGb < 1) {
+      showToast('Enter a valid volume size.');
+      return;
+    }
+    try {
+      const response = await fetch('/api/storage/volumes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, sizeGb }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error || 'Volume creation failed');
+      }
+      const volume = await response.json();
+      showToast(`Nova volume "${volume.name}" created.`);
+      await fetchVolumes();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Volume creation failed');
+    }
+  };
+
+  const handleResizeVolume = async (volume: NVMeVolume) => {
+    const sizeGb = Number(window.prompt(`New size for ${volume.name} in GiB:`, String(volume.sizeGb)));
+    if (!Number.isFinite(sizeGb) || sizeGb < volume.sizeGb) {
+      showToast('Nova volumes can only be expanded.');
+      return;
+    }
+    try {
+      const response = await fetch(`/api/storage/volumes/${encodeURIComponent(volume.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sizeGb }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error || 'Volume resize failed');
+      }
+      showToast(`Nova volume "${volume.name}" expanded to ${sizeGb} GiB.`);
+      await fetchVolumes();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Volume resize failed');
+    }
   };
 
   const handleUploadFile = () => {
-    showToast('No storage provider is connected. Connect a provider before uploading files.');
+    showToast('Nova object storage upload is not enabled yet. No file was uploaded.');
   };
 
   return (
@@ -149,13 +213,13 @@ export const StorageView: React.FC<StorageViewProps> = ({
             </h1>
           </div>
           <p className={`text-xs mt-1 ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
-            S3-compatible scalable object storage buckets, ultra low-latency NVMe block volumes, and immutable Glacier archives.
+            Nova-managed storage resources. Block volumes are active; object storage and archive engines remain unavailable until implemented.
           </p>
         </div>
 
         <button
           id="storage-create-resource-btn"
-          onClick={() => setIsCreateOpen(true)}
+          onClick={() => currentTab === 'volumes' ? handleCreateVolume() : setIsCreateOpen(true)}
           className="flex items-center gap-1.5 px-3.5 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg shadow cursor-pointer transition-colors"
         >
           <Plus className="w-4 h-4 stroke-[3]" />
@@ -423,7 +487,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <button
-                            onClick={() => showToast(`Initiated direct stream download for ${file.name}`)}
+                            onClick={() => showToast('Nova object download is not enabled yet.')}
                             className="p-1 rounded text-slate-400 hover:text-cyan-400 hover:bg-slate-800 cursor-pointer"
                             title="Download file"
                           >
@@ -445,10 +509,10 @@ export const StorageView: React.FC<StorageViewProps> = ({
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-xs text-slate-400">
-              Low-latency NVMe-oF (NVMe over Fabrics) block storage disks attached directly to virtual machines.
+              Nova-native qcow2 block volumes stored on the connected Nova compute host.
             </p>
             <button
-              onClick={() => showToast('Opening NVMe Block Volume provisioning wizard...')}
+              onClick={handleCreateVolume}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -491,7 +555,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
                       </div>
                       <div className="text-[10px] text-slate-500 font-mono">{vol.id}</div>
                     </td>
-                    <td className="py-3 px-3 font-mono text-cyan-400">{vol.sizeGb} GB NVMe</td>
+                    <td className="py-3 px-3 font-mono text-cyan-400">{vol.sizeGb} GiB</td>
                     <td className="py-3 px-3 font-mono text-emerald-400">{vol.iops.toLocaleString()} IOPS</td>
                     <td className="py-3 px-3 font-mono text-slate-300">{vol.throughput}</td>
                     <td className="py-3 px-3 font-mono text-slate-200">{vol.attachedTo}</td>
@@ -504,7 +568,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={() => showToast(`Resizing disk ${vol.name}... Enter desired capacity.`)}
+                        onClick={() => handleResizeVolume(vol)}
                         className="px-2.5 py-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded transition-colors cursor-pointer"
                       >
                         Expand
@@ -526,7 +590,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
               Immutable regulatory storage archives with automated lifecycle transitions to Glacier Deep Archive for long-term compliance.
             </p>
             <button
-              onClick={() => showToast('Creating Glacier cold storage snapshot rule...')}
+              onClick={() => showToast('Nova archive lifecycle rules are not enabled yet.')}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -584,7 +648,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={() => showToast(`Initiated expedited retrieval job for ${arc.name}.`)}
+                        onClick={() => showToast('Nova archive retrieval is not enabled yet.')}
                         className="px-2.5 py-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded transition-colors cursor-pointer"
                       >
                         Retrieve
