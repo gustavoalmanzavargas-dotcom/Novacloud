@@ -29,7 +29,7 @@ interface StorageViewProps {
   onTabChange?: (tab: string) => void;
 }
 
-type StorageSubTab = 'buckets' | 'volumes' | 'snapshots';
+type StorageSubTab = 'drives' | 'buckets' | 'volumes' | 'snapshots';
 
 interface NVMeVolume {
   id: string;
@@ -41,6 +41,23 @@ interface NVMeVolume {
   mountPoint: string;
   zone: string;
   status: 'In-Use' | 'Available';
+}
+
+interface BlockDevice {
+  name: string;
+  path: string;
+  type: string;
+  sizeBytes: number;
+  model: string;
+  serial: string;
+  transport: string;
+  rotational: boolean | null;
+  filesystem: string;
+  fsLabel: string;
+  mountpoints: string[];
+  readOnly: boolean;
+  parent: string;
+  children: BlockDevice[];
 }
 
 interface StorageSnapshot {
@@ -63,11 +80,15 @@ export const StorageView: React.FC<StorageViewProps> = ({
   onTabChange,
 }) => {
   const [currentTab, setCurrentTab] = useState<StorageSubTab>(
-    (activeSubTab as StorageSubTab) || 'buckets'
+    (activeSubTab as StorageSubTab) || 'drives'
   );
   const [storageItems, setStorageItems] = useState<StorageItem[]>(initialStorage);
   const [volumes, setVolumes] = useState<NVMeVolume[]>(INITIAL_VOLUMES);
   const [archives] = useState<StorageSnapshot[]>(INITIAL_STORAGE_SNAPSHOTS);
+  const [devices, setDevices] = useState<BlockDevice[]>([]);
+  const [stateFilesystem, setStateFilesystem] = useState<any>(null);
+  const [storageMounts, setStorageMounts] = useState<any[]>([]);
+  const [deviceLoading, setDeviceLoading] = useState(false);
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [activeBrowseItem, setActiveBrowseItem] = useState<StorageItem | null>(null);
@@ -80,7 +101,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
   const isLight = themeMode === 'light';
 
   useEffect(() => {
-    if (activeSubTab && ['buckets', 'volumes', 'snapshots'].includes(activeSubTab)) {
+    if (activeSubTab && ['drives', 'buckets', 'volumes', 'snapshots'].includes(activeSubTab)) {
       setCurrentTab(activeSubTab as StorageSubTab);
     }
   }, [activeSubTab]);
@@ -93,6 +114,25 @@ export const StorageView: React.FC<StorageViewProps> = ({
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const fetchDevices = async () => {
+    setDeviceLoading(true);
+    try {
+      const response = await fetch('/api/storage/devices');
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Unable to discover Nova host drives');
+      setDevices(Array.isArray(body?.devices) ? body.devices : []);
+      setStateFilesystem(body?.stateFilesystem || null);
+      setStorageMounts(Array.isArray(body?.mounts) ? body.mounts : []);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to discover Nova host drives');
+      setDevices([]);
+      setStateFilesystem(null);
+      setStorageMounts([]);
+    } finally {
+      setDeviceLoading(false);
+    }
   };
 
   const fetchVolumes = async () => {
@@ -121,6 +161,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
 
   useEffect(() => {
     if (currentTab === 'volumes') fetchVolumes();
+    if (currentTab === 'drives') fetchDevices();
   }, [currentTab]);
 
   const handleCreateStorage = (e: React.FormEvent) => {
@@ -219,11 +260,11 @@ export const StorageView: React.FC<StorageViewProps> = ({
 
         <button
           id="storage-create-resource-btn"
-          onClick={() => currentTab === 'volumes' ? handleCreateVolume() : setIsCreateOpen(true)}
+          onClick={() => currentTab === 'volumes' ? handleCreateVolume() : currentTab === 'drives' ? fetchDevices() : setIsCreateOpen(true)}
           className="flex items-center gap-1.5 px-3.5 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg shadow cursor-pointer transition-colors"
         >
           <Plus className="w-4 h-4 stroke-[3]" />
-          <span>Create Bucket / Volume</span>
+          <span>{currentTab === 'drives' ? 'Refresh Drives' : currentTab === 'volumes' ? 'Create Volume' : 'Create Storage'}</span>
         </button>
       </div>
 
@@ -233,6 +274,28 @@ export const StorageView: React.FC<StorageViewProps> = ({
           isLight ? 'border-slate-200' : 'border-slate-800'
         }`}
       >
+        <button
+          id="tab-storage-drives"
+          onClick={() => handleTabSelect('drives')}
+          className={`flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-b-2 cursor-pointer whitespace-nowrap ${
+            currentTab === 'drives'
+              ? isLight
+                ? 'border-cyan-600 text-cyan-700 bg-cyan-50/50'
+                : 'border-cyan-400 text-cyan-300 bg-cyan-500/10'
+              : isLight
+              ? 'border-transparent text-slate-500 hover:text-slate-800'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Disc className="w-3.5 h-3.5" />
+          <span>Physical Drives</span>
+          <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+            currentTab === 'drives'
+              ? isLight ? 'bg-cyan-200 text-cyan-900' : 'bg-cyan-500/30 text-cyan-200'
+              : isLight ? 'bg-slate-200 text-slate-700' : 'bg-slate-800 text-slate-400'
+          }`}>{devices.length}</span>
+        </button>
+
         <button
           id="tab-storage-buckets"
           onClick={() => handleTabSelect('buckets')}
@@ -277,7 +340,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
           }`}
         >
           <HardDrive className="w-3.5 h-3.5" />
-          <span>Block Volumes (NVMe)</span>
+          <span>Block Volumes</span>
           <span
             className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
               currentTab === 'volumes'
@@ -323,6 +386,129 @@ export const StorageView: React.FC<StorageViewProps> = ({
           </span>
         </button>
       </div>
+
+      {/* TAB 0: PHYSICAL DRIVES */}
+      {currentTab === 'drives' && (
+        <div className="space-y-4">
+          <div className={`rounded-xl border p-4 ${isLight ? 'bg-white border-slate-200' : 'bg-slate-900/60 border-slate-800'}`}>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className={`text-sm font-bold ${isLight ? 'text-slate-900' : 'text-slate-100'}`}>Host Storage Discovery</h3>
+                <p className={`text-xs mt-1 ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
+                  These are the block devices and mounts actually visible to the connected Nova Agent. Nova does not invent physical capacity.
+                </p>
+              </div>
+              <button
+                onClick={fetchDevices}
+                disabled={deviceLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${deviceLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
+
+            {stateFilesystem && (
+              <div className={`grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 text-xs ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
+                <div className={`rounded-lg border p-3 ${isLight ? 'border-slate-200 bg-slate-50' : 'border-slate-800 bg-slate-950/50'}`}>
+                  <div className="text-[10px] uppercase text-slate-500">Nova State Filesystem</div>
+                  <div className="font-mono font-semibold mt-1">{(Number(stateFilesystem.totalBytes || 0) / 1024 ** 3).toFixed(1)} GiB total</div>
+                </div>
+                <div className={`rounded-lg border p-3 ${isLight ? 'border-slate-200 bg-slate-50' : 'border-slate-800 bg-slate-950/50'}`}>
+                  <div className="text-[10px] uppercase text-slate-500">Used</div>
+                  <div className="font-mono font-semibold mt-1">{(Number(stateFilesystem.usedBytes || 0) / 1024 ** 3).toFixed(1)} GiB</div>
+                </div>
+                <div className={`rounded-lg border p-3 ${isLight ? 'border-slate-200 bg-slate-50' : 'border-slate-800 bg-slate-950/50'}`}>
+                  <div className="text-[10px] uppercase text-slate-500">Free</div>
+                  <div className="font-mono font-semibold mt-1">{(Number(stateFilesystem.freeBytes || 0) / 1024 ** 3).toFixed(1)} GiB</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className={`rounded-xl border overflow-hidden ${isLight ? 'bg-white border-slate-200' : 'bg-slate-900/60 border-slate-800'}`}>
+            <table className="w-full text-left text-xs">
+              <thead className={isLight ? 'bg-slate-50 text-slate-500' : 'bg-slate-950/50 text-slate-400'}>
+                <tr className="text-[10px] uppercase tracking-wide">
+                  <th className="px-4 py-3">Device</th>
+                  <th className="px-3 py-3">Model</th>
+                  <th className="px-3 py-3">Type</th>
+                  <th className="px-3 py-3">Size</th>
+                  <th className="px-3 py-3">Filesystem</th>
+                  <th className="px-3 py-3">Mount</th>
+                  <th className="px-3 py-3">Transport</th>
+                  <th className="px-4 py-3">Access</th>
+                </tr>
+              </thead>
+              <tbody className={isLight ? 'divide-y divide-slate-200 text-slate-800' : 'divide-y divide-slate-800 text-slate-200'}>
+                {devices.map((device) => (
+                  <React.Fragment key={device.path || device.name}>
+                    <tr>
+                      <td className="px-4 py-3">
+                        <div className="font-mono font-semibold">{device.path || device.name}</div>
+                        {device.serial && <div className="text-[10px] text-slate-500">SN: {device.serial}</div>}
+                      </td>
+                      <td className="px-3 py-3">{device.model || '—'}</td>
+                      <td className="px-3 py-3 font-mono">{device.type || '—'}</td>
+                      <td className="px-3 py-3 font-mono">{(Number(device.sizeBytes || 0) / 1024 ** 3).toFixed(2)} GiB</td>
+                      <td className="px-3 py-3 font-mono">{device.filesystem || '—'}</td>
+                      <td className="px-3 py-3 font-mono text-[11px]">{device.mountpoints?.join(', ') || '—'}</td>
+                      <td className="px-3 py-3 font-mono">{device.transport || '—'}</td>
+                      <td className="px-4 py-3">
+                        <span className={device.readOnly ? 'text-amber-500' : 'text-emerald-500'}>
+                          {device.readOnly ? 'Read only' : 'Visible'}
+                        </span>
+                      </td>
+                    </tr>
+                    {(device.children || []).map((child) => (
+                      <tr key={child.path || child.name} className={isLight ? 'bg-slate-50/50' : 'bg-slate-950/20'}>
+                        <td className="px-4 py-2 pl-8 font-mono text-[11px]">↳ {child.path || child.name}</td>
+                        <td className="px-3 py-2">{child.model || '—'}</td>
+                        <td className="px-3 py-2 font-mono">{child.type || '—'}</td>
+                        <td className="px-3 py-2 font-mono">{(Number(child.sizeBytes || 0) / 1024 ** 3).toFixed(2)} GiB</td>
+                        <td className="px-3 py-2 font-mono">{child.filesystem || '—'}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{child.mountpoints?.join(', ') || '—'}</td>
+                        <td className="px-3 py-2 font-mono">{child.transport || '—'}</td>
+                        <td className="px-4 py-2">{child.readOnly ? 'Read only' : 'Visible'}</td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                ))}
+                {!devices.length && !deviceLoading && (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-10 text-center text-slate-500">
+                      No block devices are visible inside this Nova host environment.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className={`rounded-xl border overflow-hidden ${isLight ? 'bg-white border-slate-200' : 'bg-slate-900/60 border-slate-800'}`}>
+            <div className={`px-4 py-3 border-b text-xs font-semibold ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>Mounted Filesystems</div>
+            <table className="w-full text-left text-xs">
+              <thead className={isLight ? 'bg-slate-50 text-slate-500' : 'bg-slate-950/50 text-slate-400'}>
+                <tr className="text-[10px] uppercase tracking-wide">
+                  <th className="px-4 py-2">Source</th><th className="px-3 py-2">Target</th><th className="px-3 py-2">Filesystem</th><th className="px-3 py-2">Size</th><th className="px-3 py-2">Used</th><th className="px-3 py-2">Available</th>
+                </tr>
+              </thead>
+              <tbody className={isLight ? 'divide-y divide-slate-200 text-slate-800' : 'divide-y divide-slate-800 text-slate-200'}>
+                {storageMounts.map((mount: any, index) => (
+                  <tr key={index}>
+                    <td className="px-4 py-2 font-mono">{mount.source || '—'}</td>
+                    <td className="px-3 py-2 font-mono">{mount.target || '—'}</td>
+                    <td className="px-3 py-2 font-mono">{mount.fstype || '—'}</td>
+                    <td className="px-3 py-2 font-mono">{Number(mount.size || 0) ? (Number(mount.size) / 1024 ** 3).toFixed(1) + ' GiB' : '—'}</td>
+                    <td className="px-3 py-2 font-mono">{Number(mount.used || 0) ? (Number(mount.used) / 1024 ** 3).toFixed(1) + ' GiB' : '—'}</td>
+                    <td className="px-3 py-2 font-mono">{Number(mount.avail || 0) ? (Number(mount.avail) / 1024 ** 3).toFixed(1) + ' GiB' : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: BUCKETS (S3) */}
       {currentTab === 'buckets' && (
