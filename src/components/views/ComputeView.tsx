@@ -106,7 +106,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Sub-items states
-  const [images] = useState<OSImage[]>(INITIAL_IMAGES);
+  const [images, setImages] = useState<OSImage[]>(INITIAL_IMAGES);
   const [snapshots, setSnapshots] = useState<Snapshot[]>(INITIAL_SNAPSHOTS);
   const [groups] = useState<InstanceGroup[]>(INITIAL_GROUPS);
   const [keys, setKeys] = useState<SSHKey[]>(INITIAL_KEYS);
@@ -117,9 +117,35 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
   const [newPublicKey, setNewPublicKey] = useState('');
   const [showCreateSnapModal, setShowCreateSnapModal] = useState(false);
   const [newSnapName, setNewSnapName] = useState('');
-  const [newSnapVm, setNewSnapVm] = useState('vm-01');
+  const [newSnapVm, setNewSnapVm] = useState('');
 
+  const [isWorking, setIsWorking] = useState(false);
   const isLight = themeMode === 'light';
+
+  const readError = async (response: Response, fallback: string) => {
+    const body = await response.json().catch(() => ({}));
+    return body?.error || fallback;
+  };
+
+  const loadComputeData = async () => {
+    const [imagesResult, snapshotsResult, keysResult] = await Promise.allSettled([
+      fetch('/api/compute/images').then(async (response) => {
+        if (!response.ok) throw new Error(await readError(response, 'Unable to load images'));
+        return response.json();
+      }),
+      fetch('/api/compute/snapshots').then(async (response) => {
+        if (!response.ok) throw new Error(await readError(response, 'Unable to load snapshots'));
+        return response.json();
+      }),
+      fetch('/api/compute/ssh-keys').then(async (response) => {
+        if (!response.ok) throw new Error(await readError(response, 'Unable to load SSH keys'));
+        return response.json();
+      }),
+    ]);
+    if (imagesResult.status === 'fulfilled') setImages(Array.isArray(imagesResult.value) ? imagesResult.value : []);
+    if (snapshotsResult.status === 'fulfilled') setSnapshots(Array.isArray(snapshotsResult.value) ? snapshotsResult.value : []);
+    if (keysResult.status === 'fulfilled') setKeys(Array.isArray(keysResult.value) ? keysResult.value : []);
+  };
 
   // Synchronize when activeSubTab prop changes
   useEffect(() => {
@@ -127,6 +153,14 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
       setCurrentTab(activeSubTab as ComputeTab);
     }
   }, [activeSubTab]);
+
+  useEffect(() => {
+    loadComputeData().catch((error) => showToast(error instanceof Error ? error.message : 'Unable to load compute data'));
+  }, []);
+
+  useEffect(() => {
+    if (!newSnapVm && safeVms[0]?.id) setNewSnapVm(safeVms[0].id);
+  }, [vms]);
 
   const handleTabSelect = (tab: ComputeTab) => {
     setCurrentTab(tab);
@@ -138,46 +172,172 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const handleBulkTerminate = () => {
-    const count = selectedIds.length;
-    showToast(`Requested graceful ACPI termination signal for ${count} instance(s).`);
-    setSelectedIds([]);
+  const handleBulkTerminate = async () => {
+    if (!selectedIds.length || isWorking) return;
+    setIsWorking(true);
+    try {
+      const results = await Promise.all(selectedIds.map(async (id) => {
+        const response = await fetch(`/api/compute/vms/${encodeURIComponent(id)}/action`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'shutdown' }),
+        });
+        if (!response.ok) throw new Error(await readError(response, `Unable to shut down ${id}`));
+        return response.json();
+      }));
+      showToast(`Submitted graceful shutdown for ${results.length} instance(s).`);
+      setSelectedIds([]);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Bulk shutdown failed');
+    } finally {
+      setIsWorking(false);
+    }
   };
 
-  const handleAddSSHKey = (e: React.FormEvent) => {
+  const handleAddSSHKey = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newKeyName.trim()) return;
-    const newKey: SSHKey = {
-      id: `key-${Date.now().toString(36)}`,
-      name: newKeyName.trim(),
-      fingerprint: `SHA256:${Math.random().toString(36).substring(2, 15)}...`,
-      type: newPublicKey.includes('ssh-rsa') ? 'RSA-4096' : 'ED25519',
-      created: 'Just now',
-      lastUsed: 'Never',
-    };
-    setKeys([newKey, ...keys]);
-    setShowAddKeyModal(false);
-    setNewKeyName('');
-    setNewPublicKey('');
-    showToast(`Public SSH key "${newKey.name}" registered across cloud-init infrastructure.`);
+    if (!newKeyName.trim() || !newPublicKey.trim() || isWorking) return;
+    setIsWorking(true);
+    try {
+      const response = await fetch('/api/compute/ssh-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newKeyName.trim(), publicKey: newPublicKey.trim() }),
+      });
+      if (!response.ok) throw new Error(await readError(response, 'Unable to import SSH key'));
+      const newKey = await response.json();
+      setKeys((current) => [newKey, ...current]);
+      setShowAddKeyModal(false);
+      setNewKeyName('');
+      setNewPublicKey('');
+      showToast(`SSH key "${newKey.name}" saved.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to import SSH key');
+    } finally {
+      setIsWorking(false);
+    }
   };
 
-  const handleCreateSnapshot = (e: React.FormEvent) => {
+  const handleDeleteKey = async (key: SSHKey) => {
+    if (isWorking) return;
+    setIsWorking(true);
+    try {
+      const response = await fetch(`/api/compute/ssh-keys/${encodeURIComponent(key.id)}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error(await readError(response, 'Unable to delete SSH key'));
+      setKeys((current) => current.filter((item) => item.id !== key.id));
+      showToast(`SSH key "${key.name}" deleted.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to delete SSH key');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleCreateSnapshot = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSnapName.trim()) return;
-    const newSnap: Snapshot = {
-      id: `snap-${Date.now().toString(36).substring(0, 8)}`,
-      name: newSnapName.trim(),
-      sourceVm: `${newSnapVm} (Live)`,
-      sizeGb: 100,
-      created: 'Just now',
-      encryption: 'AES-256-XTS',
-      status: 'Available',
-    };
-    setSnapshots([newSnap, ...snapshots]);
-    setShowCreateSnapModal(false);
-    setNewSnapName('');
-    showToast(`Point-in-time snapshot "${newSnap.name}" created successfully.`);
+    if (!newSnapName.trim() || !newSnapVm || isWorking) return;
+    setIsWorking(true);
+    try {
+      const response = await fetch(`/api/compute/vms/${encodeURIComponent(newSnapVm)}/snapshots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newSnapName.trim() }),
+      });
+      if (!response.ok) throw new Error(await readError(response, 'Snapshot creation failed'));
+      setShowCreateSnapModal(false);
+      showToast(`Snapshot "${newSnapName.trim()}" submitted to Proxmox.`);
+      setNewSnapName('');
+      window.setTimeout(() => loadComputeData(), 2000);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Snapshot creation failed');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleRestoreSnapshot = async (snapshot: Snapshot) => {
+    if (isWorking) return;
+    if (!window.confirm(`Roll back ${snapshot.sourceVm} to snapshot "${snapshot.name}"? Current VM state will be replaced.`)) return;
+    setIsWorking(true);
+    try {
+      const response = await fetch('/api/compute/snapshots/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: snapshot.id }),
+      });
+      if (!response.ok) throw new Error(await readError(response, 'Snapshot rollback failed'));
+      showToast(`Rollback of "${snapshot.name}" submitted to Proxmox.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Snapshot rollback failed');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleImportImage = async () => {
+    const url = window.prompt('Enter a direct HTTP/HTTPS URL to an ISO image:');
+    if (!url) return;
+    let filename = '';
+    try {
+      filename = new URL(url).pathname.split('/').filter(Boolean).pop() || 'custom-image.iso';
+    } catch {
+      showToast('Enter a valid HTTP or HTTPS URL.');
+      return;
+    }
+    const requestedName = window.prompt('Filename to save in Proxmox storage:', filename);
+    if (!requestedName || isWorking) return;
+    setIsWorking(true);
+    try {
+      const response = await fetch('/api/compute/images/import-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, filename: requestedName }),
+      });
+      if (!response.ok) throw new Error(await readError(response, 'Image import failed'));
+      showToast(`Proxmox started importing "${requestedName}".`);
+      window.setTimeout(() => loadComputeData(), 3000);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Image import failed');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleLaunchInstance = async () => {
+    if (isWorking) return;
+    setIsWorking(true);
+    try {
+      const optionsResponse = await fetch('/api/compute/options');
+      if (!optionsResponse.ok) throw new Error(await readError(optionsResponse, 'Unable to load Proxmox options'));
+      const options = await optionsResponse.json();
+      if (!options.configured) throw new Error('Configure the Proxmox provider before creating an instance.');
+      const name = window.prompt('VM name:');
+      if (!name) return;
+      const node = window.prompt('Proxmox node:', options.nodes?.[0] || '');
+      if (!node) return;
+      const matchingStorage = options.storages?.find((item: any) => item.node === node)?.storage || options.storages?.[0]?.storage || '';
+      const storage = window.prompt('VM disk storage:', matchingStorage);
+      if (!storage) return;
+      const bridge = window.prompt('Network bridge:', options.bridges?.[0] || 'vmbr0');
+      if (!bridge) return;
+      const iso = window.prompt('ISO volume ID (optional, e.g. local:iso/debian.iso):', images.find((item: any) => item.id)?.id || '') || '';
+      const cores = Number(window.prompt('vCPU cores:', '2') || '2');
+      const memoryMb = Number(window.prompt('Memory in MiB:', '4096') || '4096');
+      const diskGb = Number(window.prompt('Disk size in GiB:', '32') || '32');
+      const response = await fetch('/api/compute/vms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, node, storage, bridge, iso, cores, memoryMb, diskGb, vmid: options.nextId }),
+      });
+      if (!response.ok) throw new Error(await readError(response, 'VM creation failed'));
+      const result = await response.json();
+      showToast(`VM "${result.name}" creation submitted to Proxmox as ID ${result.vmid}.`);
+      window.setTimeout(() => window.location.reload(), 2500);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'VM creation failed');
+    } finally {
+      setIsWorking(false);
+    }
   };
 
   const safeVms = Array.isArray(vms) ? vms : [];
@@ -187,17 +347,17 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
   const runningCount = safeVms.filter((v) => v.status === 'Running').length;
   const stoppedCount = safeVms.filter((v) => v.status === 'Stopped').length;
   const avgCpu = Math.round(
-    safeVms.reduce((acc, v) => acc + (v.metrics?.cpu || 0), 0) / (totalCount || 1)
+    safeVms.reduce((acc, v) => acc + (v.cpuUsagePct || 0), 0) / (totalCount || 1)
   );
   const avgRam = Math.round(
-    safeVms.reduce((acc, v) => acc + (v.metrics?.ram || 0), 0) / (totalCount || 1)
+    safeVms.reduce((acc, v) => acc + (v.memUsagePct || 0), 0) / (totalCount || 1)
   );
 
   const filteredVms = safeVms.filter((vm) => {
     const matchesSearch =
       vm.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      vm.ip.includes(searchTerm) ||
-      vm.type.toLowerCase().includes(searchTerm.toLowerCase());
+      (vm.privateIp || '').includes(searchTerm) ||
+      (vm.os || '').toLowerCase().includes(searchTerm.toLowerCase());
     const matchesStatus = statusFilter === 'All' || vm.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
@@ -273,7 +433,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
           )}
           <button
             id="compute-create-instance-btn"
-            onClick={onOpenCreateInstance}
+            onClick={handleLaunchInstance}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg shadow-sm hover:shadow-cyan-500/25 transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4 stroke-[3]" />
@@ -690,7 +850,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
               Verified operating system images and customized gold images preloaded with developer runtimes and hypervisor tools.
             </p>
             <button
-              onClick={() => showToast('Connecting to image registry... Direct QCOW2/RAW upload enabled.')}
+              onClick={handleImportImage}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Upload className="w-3.5 h-3.5" />
@@ -755,7 +915,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={onOpenCreateInstance}
+                        onClick={handleLaunchInstance}
                         className="px-2.5 py-1 text-xs font-semibold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 rounded transition-colors cursor-pointer"
                       >
                         Deploy
@@ -836,7 +996,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
-                          onClick={() => showToast(`Restoring volume from snapshot ${snap.id}...`)}
+                          onClick={() => handleRestoreSnapshot(snap)}
                           className="px-2.5 py-1 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded transition-colors cursor-pointer"
                         >
                           Restore
@@ -859,7 +1019,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
               Autoscaling instance groups ensure high availability, automatic replacement of unhealthy nodes, and dynamic elasticity.
             </p>
             <button
-              onClick={() => showToast('Opening Autoscaling Group creation wizard...')}
+              onClick={() => showToast('Autoscaling groups are not supported by the connected Proxmox provider yet.')}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -906,7 +1066,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
                   <span>Policy: <strong className="text-slate-200">{grp.scalingPolicy}</strong></span>
                   <button
-                    onClick={() => showToast(`Triggered manual pool evaluation for ${grp.name}.`)}
+                    onClick={() => showToast(`Autoscaling evaluation is unavailable for ${grp.name} on the current provider.`)}
                     className="text-xs text-cyan-400 hover:text-cyan-300 font-medium cursor-pointer"
                   >
                     Edit Policy
@@ -977,10 +1137,7 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                     <td className="py-3 px-3 text-slate-300 font-mono text-[11px]">{k.lastUsed}</td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={() => {
-                          setKeys(keys.filter((item) => item.id !== k.id));
-                          showToast(`Revoked key ${k.name}.`);
-                        }}
+                        onClick={() => handleDeleteKey(k)}
                         className="px-2 py-1 text-xs font-semibold text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded transition-colors cursor-pointer"
                       >
                         Delete
@@ -1110,8 +1267,8 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-100 focus:outline-none focus:ring-1 focus:ring-cyan-500"
                 >
                   {safeVms.map((v) => (
-                    <option key={v.id} value={v.name}>
-                      {v.name} ({v.type})
+                    <option key={v.id} value={v.id}>
+                      {v.name} ({v.os})
                     </option>
                   ))}
                 </select>
