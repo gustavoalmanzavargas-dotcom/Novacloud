@@ -1,9 +1,9 @@
-import {Component, StrictMode, type ErrorInfo, type ReactNode} from 'react';
+import React, {StrictMode, type ErrorInfo, type ReactNode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
-class NovaErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+class NovaErrorBoundary extends React.Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
 
   static getDerivedStateFromError(error: Error) {
