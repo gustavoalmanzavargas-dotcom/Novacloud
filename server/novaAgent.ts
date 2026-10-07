@@ -477,6 +477,44 @@ app.get('/v1/images', (_req, res) => {
   res.json(items);
 });
 
+app.post('/v1/images/upload', async (req, res) => {
+  try {
+    const filename = safeFilename(String(req.query?.filename || '').trim());
+    const destination = path.join(imagesDir, filename);
+    if (fs.existsSync(destination)) return res.status(409).json({ error: 'An image with that filename already exists' });
+    const temp = `${destination}.part`;
+    const file = fs.createWriteStream(temp, { mode: 0o600 });
+    let received = 0;
+    req.on('data', (chunk) => { received += chunk.length; });
+    req.pipe(file);
+    file.on('finish', () => {
+      file.close();
+      if (received < 1) {
+        try { fs.unlinkSync(temp); } catch {}
+        res.status(400).json({ error: 'Uploaded image is empty' });
+        return;
+      }
+      fs.renameSync(temp, destination);
+      res.status(201).json({
+        id: filename,
+        name: filename,
+        sizeBytes: received,
+        format: path.extname(filename).slice(1).toLowerCase() || 'unknown',
+      });
+    });
+    file.on('error', (error) => {
+      try { fs.unlinkSync(temp); } catch {}
+      if (!res.headersSent) res.status(500).json({ error: error.message || 'Image upload failed' });
+    });
+    req.on('aborted', () => {
+      file.destroy();
+      try { fs.unlinkSync(temp); } catch {}
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Image upload failed' });
+  }
+});
+
 app.post('/v1/images/import-url', async (req, res) => {
   try {
     const url = String(req.body?.url || '').trim();
