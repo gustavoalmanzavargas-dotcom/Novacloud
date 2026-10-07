@@ -264,6 +264,12 @@ function writeNoVncTokens() {
 
 function startInstance(instance: InstanceState) {
   if (pidFor(instance)) return currentState(instance);
+  if (!instance.vncDisplay || !instance.vncPort) {
+    instance.vncDisplay = nextVncDisplay();
+    instance.vncPort = 5900 + instance.vncDisplay;
+    saveInstance(instance);
+    writeNoVncTokens();
+  }
   if (!commandExists('qemu-system-x86_64')) throw new Error('QEMU is not installed on this Nova host');
 
   const acceleration: 'kvm' | 'tcg' = canUseKvm() ? 'kvm' : 'tcg';
