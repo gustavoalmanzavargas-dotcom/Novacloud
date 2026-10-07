@@ -53,13 +53,14 @@ async function syncNovaAgentInventory() {
   if (!novaAgentConfigured()) return;
   if (novaSyncInFlight) return novaSyncInFlight;
   novaSyncInFlight = (async () => {
-  const [host, instances, images, networks, volumes, apps] = await Promise.all([
+  const [host, instances, images, networks, volumes, apps, containers] = await Promise.all([
     novaAgentRequest('/v1/host'),
     novaAgentRequest('/v1/instances'),
     novaAgentRequest('/v1/images'),
     novaAgentRequest('/v1/networks'),
     novaAgentRequest('/v1/volumes'),
     novaAgentRequest('/v1/apps'),
+    novaAgentRequest('/v1/containers'),
   ]);
 
   const hostResult = await pool.query(
@@ -226,6 +227,27 @@ async function syncNovaAgentInventory() {
     await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'application'`);
   }
 
+  const containerIds: string[] = [];
+  for (const container of Array.isArray(containers) ? containers : []) {
+    containerIds.push(container.id);
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('container', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [container.id, container],
+    );
+  }
+  if (containerIds.length) {
+    await pool.query(
+      `DELETE FROM resources WHERE provider = 'nova-native' AND type = 'container'
+       AND NOT (external_id = ANY($1::text[]))`,
+      [containerIds],
+    );
+  } else {
+    await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'container'`);
+  }
+
   publishNovaEvent('resource-sync', {
     hostId: host.id,
     instances: instanceIds.length,
@@ -233,6 +255,7 @@ async function syncNovaAgentInventory() {
     networks: networkIds.length,
     volumes: volumeIds.length,
     applications: appIds.length,
+    containers: containerIds.length,
     timestamp: new Date().toISOString(),
   });
   })().finally(() => {
@@ -736,6 +759,91 @@ app.post('/api/nova/sync', requireAuth, async (_req, res) => {
     res.json({ success: true, syncedAt: new Date().toISOString() });
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Nova Agent sync failed' });
+  }
+});
+
+app.get('/api/containers/options', requireAuth, async (_req, res) => {
+  try {
+    const host = await novaAgentRequest('/v1/host');
+    res.json({
+      configured: true,
+      host: { id: host.id, name: host.hostname },
+      available: Boolean(host.capabilities?.containers),
+      runtime: host.capabilities?.containerRuntime || 'none',
+      bases: [{ id: 'debian-13', name: 'Debian 13 Minimal' }],
+      networks: [{ id: 'private', name: 'Private namespace (isolated)' }],
+    });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read container options' });
+  }
+});
+
+app.get('/api/containers', requireAuth, async (_req, res) => {
+  try {
+    res.json(await novaAgentRequest('/v1/containers'));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Nova containers' });
+  }
+});
+
+app.post('/api/containers', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const cpuLimit = Number(req.body?.cpuLimit || 1);
+  const memoryMb = Number(req.body?.memoryMb || 1024);
+  const base = String(req.body?.base || 'debian-13');
+  const jobId = await createJob('container.create', req.session.userId, 'container', null, { name, cpuLimit, memoryMb, base });
+  try {
+    const container = await novaAgentRequest('/v1/containers', 'POST', {
+      name, cpuLimit, memoryMb, base, start: true,
+    }, 360000);
+    await finishJob(jobId, 'succeeded', container);
+    await syncNovaAgentInventory();
+    res.status(201).json({ ...container, jobId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Container creation failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.post('/api/containers/:id/action', requireAuth, async (req, res) => {
+  try {
+    const action = String(req.body?.action || '');
+    if (!['start', 'stop', 'shutdown', 'restart'].includes(action)) return res.status(400).json({ error: 'Unsupported container action' });
+    const container = await novaAgentRequest(
+      `/v1/containers/${encodeURIComponent(req.params.id)}/action`,
+      'POST',
+      { action },
+      60000,
+    );
+    await syncNovaAgentInventory();
+    res.json(container);
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Container action failed' });
+  }
+});
+
+app.post('/api/containers/:id/exec', requireAuth, async (req, res) => {
+  try {
+    const result = await novaAgentRequest(
+      `/v1/containers/${encodeURIComponent(req.params.id)}/exec`,
+      'POST',
+      { command: String(req.body?.command || '') },
+      45000,
+    );
+    res.json(result);
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Container command failed' });
+  }
+});
+
+app.delete('/api/containers/:id', requireAuth, async (req, res) => {
+  try {
+    await novaAgentRequest(`/v1/containers/${encodeURIComponent(req.params.id)}`, 'DELETE', undefined, 60000);
+    await syncNovaAgentInventory();
+    res.status(204).end();
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Container deletion failed' });
   }
 });
 
