@@ -41,13 +41,15 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
   );
   const [databases, setDatabases] = useState<DatabaseItem[]>(initialDatabases);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [selectedConsoleDb, setSelectedConsoleDb] = useState<DatabaseItem>(initialDatabases[0]);
-  const [selectedBackupsDb, setSelectedBackupsDb] = useState<DatabaseItem>(initialDatabases[0]);
+  const [selectedConsoleDb, setSelectedConsoleDb] = useState<DatabaseItem | null>(initialDatabases[0] || null);
+  const [selectedBackupsDb, setSelectedBackupsDb] = useState<DatabaseItem | null>(initialDatabases[0] || null);
   const [isCreateDbOpen, setIsCreateDbOpen] = useState(false);
   const [newDbName, setNewDbName] = useState('');
   const [newDbEngine, setNewDbEngine] = useState('PostgreSQL 16');
   const [sqlQuery, setSqlQuery] = useState('');
   const [queryResult, setQueryResult] = useState<any[]>([]);
+  const [queryFields, setQueryFields] = useState<string[]>([]);
+  const [snapshots, setSnapshots] = useState<any[]>([]);
   const [isExecutingSql, setIsExecutingSql] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -58,6 +60,38 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
       setCurrentTab(activeSubTab as DbSubTab);
     }
   }, [activeSubTab]);
+
+  const loadDatabases = async () => {
+    try {
+      const response = await fetch('/api/databases');
+      const body = await response.json().catch(() => ([]));
+      if (!response.ok) throw new Error(body?.error || 'Unable to load databases');
+      const list = Array.isArray(body) ? body : [];
+      setDatabases(list);
+      if (!selectedConsoleDb && list[0]) setSelectedConsoleDb(list[0]);
+      if (!selectedBackupsDb && list[0]) setSelectedBackupsDb(list[0]);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to load databases');
+    }
+  };
+
+  const loadSnapshots = async (databaseId?: string) => {
+    if (!databaseId) {
+      setSnapshots([]);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/databases/${encodeURIComponent(databaseId)}/snapshots`);
+      const body = await response.json().catch(() => ([]));
+      if (!response.ok) throw new Error(body?.error || 'Unable to load snapshots');
+      setSnapshots(Array.isArray(body) ? body : []);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to load snapshots');
+    }
+  };
+
+  useEffect(() => { loadDatabases(); }, []);
+  useEffect(() => { loadSnapshots(selectedBackupsDb?.id); }, [selectedBackupsDb?.id]);
 
   const handleTabSelect = (tab: DbSubTab) => {
     setCurrentTab(tab);
@@ -76,18 +110,65 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleCreateCluster = (e: React.FormEvent) => {
+  const handleCreateCluster = async (e: React.FormEvent) => {
     e.preventDefault();
-    showToast('Database provisioning is not connected to a provider yet.');
+    try {
+      const response = await fetch('/api/databases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newDbName.trim(), engine: newDbEngine }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Database provisioning failed');
+      setDatabases((current) => [body, ...current]);
+      setSelectedConsoleDb(body);
+      setSelectedBackupsDb(body);
+      setIsCreateDbOpen(false);
+      setNewDbName('');
+      showToast(`Database "${body.name}" created.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Database provisioning failed');
+    }
   };
 
-  const handleExecuteSql = () => {
-    setQueryResult([]);
-    showToast('Direct SQL execution is disabled until a real database provider connection is configured.');
+  const handleExecuteSql = async () => {
+    if (!selectedConsoleDb || !sqlQuery.trim() || isExecutingSql) return;
+    setIsExecutingSql(true);
+    try {
+      const response = await fetch(`/api/databases/${encodeURIComponent(selectedConsoleDb?.id || '')}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: sqlQuery }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'SQL execution failed');
+      setQueryResult(Array.isArray(body.rows) ? body.rows : []);
+      setQueryFields(Array.isArray(body.fields) ? body.fields : []);
+      showToast(`${body.rowCount ?? 0} row(s) returned.`);
+    } catch (error) {
+      setQueryResult([]);
+      setQueryFields([]);
+      showToast(error instanceof Error ? error.message : 'SQL execution failed');
+    } finally {
+      setIsExecutingSql(false);
+    }
   };
 
-  const handleCreateSnapshot = (_dbName: string) => {
-    showToast('Snapshot creation is disabled until a real database provider connection is configured.');
+  const handleCreateSnapshot = async () => {
+    if (!selectedBackupsDb) return;
+    try {
+      const response = await fetch(`/api/databases/${encodeURIComponent(selectedBackupsDb?.id || '')}/snapshots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || 'Database snapshot failed');
+      setSnapshots((current) => [body, ...current]);
+      showToast(`Snapshot "${body.name}" created.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Database snapshot failed');
+    }
   };
 
   return (
@@ -122,7 +203,7 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
             </h1>
           </div>
           <p className={`text-xs mt-1 ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
-            Managed PostgreSQL, Redis clusters, and document stores with multi-AZ replication and automated PITR snapshots.
+            Nova-managed PostgreSQL logical databases with real SQL execution and manual pg_dump snapshots.
           </p>
         </div>
 
@@ -362,7 +443,7 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
             <div className="flex items-center gap-2">
               <label className="text-xs text-slate-400 font-semibold">Target Database:</label>
               <select
-                value={selectedConsoleDb.id}
+                value={selectedConsoleDb?.id || ''}
                 onChange={(e) => {
                   const found = databases.find((d) => d.id === e.target.value);
                   if (found) setSelectedConsoleDb(found);
@@ -407,7 +488,7 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
 
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono text-slate-400">
-                Connected: {selectedConsoleDb.endpoint}
+                Connected: {selectedConsoleDb?.endpoint || 'No database selected'}
               </span>
               <button
                 disabled={isExecutingSql}
@@ -422,31 +503,21 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
             {queryResult && (
               <div className="space-y-2 pt-2">
                 <div className="text-xs font-bold text-slate-200">
-                  Result Set (4 rows returned in 4.8ms)
+                  Result Set
                 </div>
                 <div className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950">
                   <table className="w-full text-left text-xs font-mono">
                     <thead className="border-b border-slate-800 text-[11px] text-slate-400 uppercase bg-slate-900">
                       <tr>
-                        <th className="py-2.5 px-3">id</th>
-                        <th className="py-2.5 px-3">username</th>
-                        <th className="py-2.5 px-3">email</th>
-                        <th className="py-2.5 px-3">role</th>
-                        <th className="py-2.5 px-3">created_at</th>
+                        {queryFields.map((field) => <th key={field} className="py-2.5 px-3">{field}</th>)}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/40">
-                      {queryResult.map((row) => (
-                        <tr key={row.id} className="hover:bg-slate-900/50">
-                          <td className="py-2.5 px-3 text-cyan-400">{row.id}</td>
-                          <td className="py-2.5 px-3 text-slate-200 font-semibold">{row.username}</td>
-                          <td className="py-2.5 px-3 text-slate-400">{row.email}</td>
-                          <td className="py-2.5 px-3">
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400 font-semibold border border-cyan-500/20">
-                              {row.role}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-500 text-[11px]">{row.created_at}</td>
+                      {queryResult.map((row, index) => (
+                        <tr key={index} className="hover:bg-slate-900/50">
+                          {queryFields.map((field) => (
+                            <td key={field} className="py-2.5 px-3 text-slate-300">{String(row?.[field] ?? '')}</td>
+                          ))}
                         </tr>
                       ))}
                     </tbody>
@@ -470,17 +541,17 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
               <Archive className="w-5 h-5 text-cyan-400" />
               <div>
                 <h3 className="text-sm font-bold text-slate-100">
-                  Continuous Point-in-Time Recovery (PITR)
+                  Database Snapshots
                 </h3>
                 <p className="text-[11px] text-slate-400">
-                  WAL logs streamed to redundant S3 storage for second-level recovery precision up to 35 days.
+                  Manual PostgreSQL schema snapshots stored by Nova on the controller.
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2">
               <select
-                value={selectedBackupsDb.id}
+                value={selectedBackupsDb?.id || ''}
                 onChange={(e) => {
                   const found = databases.find((d) => d.id === e.target.value);
                   if (found) setSelectedBackupsDb(found);
@@ -495,7 +566,7 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
               </select>
 
               <button
-                onClick={() => handleCreateSnapshot(selectedBackupsDb.name)}
+                onClick={handleCreateSnapshot}
                 className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
               >
                 Take Snapshot Now
@@ -504,27 +575,22 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
           </div>
 
           <div className="space-y-2">
-            {[
-              { id: `snap-pitr-${selectedBackupsDb.name}-today`, time: 'Today at 04:00 AM UTC', size: '28.4 GB', type: 'Daily Automated', status: 'Available' },
-              { id: `snap-pitr-${selectedBackupsDb.name}-yest`, time: 'Yesterday at 04:00 AM UTC', size: '28.1 GB', type: 'Daily Automated', status: 'Available' },
-              { id: `snap-pitr-${selectedBackupsDb.name}-pre-mig`, time: '3 days ago at 11:20 AM UTC', size: '27.9 GB', type: 'Manual Checkpoint', status: 'Available' },
-              { id: `snap-pitr-${selectedBackupsDb.name}-weekly`, time: '7 days ago at 00:00 AM UTC', size: '26.8 GB', type: 'Weekly Rollup', status: 'Archived' },
-            ].map((s) => (
+            {snapshots.map((s) => (
               <div
                 key={s.id}
                 className="p-3.5 rounded-lg border border-slate-800 bg-slate-950 flex items-center justify-between text-xs font-mono"
               >
                 <div className="space-y-0.5">
                   <div className="font-bold text-slate-200">{s.id}</div>
-                  <div className="text-[11px] text-slate-400">{s.time}</div>
+                  <div className="text-[11px] text-slate-400">{s.createdAt ? new Date(s.createdAt).toLocaleString() : 'Unknown time'}</div>
                 </div>
                 <div className="flex items-center gap-4">
                   <div className="text-right">
-                    <div className="text-cyan-400 font-bold">{s.size}</div>
-                    <span className="text-[10px] text-emerald-400">{s.type}</span>
+                    <div className="text-cyan-400 font-bold">{((Number(s.sizeBytes || 0) / 1024 / 1024).toFixed(1))} MB</div>
+                    <span className="text-[10px] text-emerald-400">{s.status}</span>
                   </div>
                   <button
-                    onClick={() => showToast(`Initiating PITR restore from ${s.id}...`)}
+                    onClick={() => showToast('Database snapshot restore is not enabled yet; Nova will not claim a restore occurred.')}
                     className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 text-[11px] cursor-pointer"
                   >
                     Restore
@@ -595,10 +661,7 @@ export const DatabasesView: React.FC<DatabasesViewProps> = ({
                       : 'bg-slate-950 border-slate-800 text-white focus:border-cyan-400'
                   }`}
                 >
-                  <option value="PostgreSQL 16">PostgreSQL 16 Enterprise</option>
-                  <option value="PostgreSQL 15">PostgreSQL 15 with TimescaleDB</option>
-                  <option value="Redis 7.2">Redis 7.2 In-Memory Cluster</option>
-                  <option value="MongoDB 7.0">MongoDB 7.0 Compatible Document Store</option>
+                  <option value="PostgreSQL 16">PostgreSQL (Nova managed)</option>
                 </select>
               </div>
 
