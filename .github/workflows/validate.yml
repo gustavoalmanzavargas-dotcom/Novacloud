@@ -17,6 +17,7 @@ jobs:
       - run: npm run build
       - run: bash -n install.sh
       - run: bash -n scripts/install-nova-agent.sh
+      - run: bash -n scripts/enable-single-node.sh
       - name: Smoke test Nova Agent
         run: |
           mkdir -p "$RUNNER_TEMP/nova-agent-state" "$RUNNER_TEMP/nova-agent-run"

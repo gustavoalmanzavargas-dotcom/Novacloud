@@ -13,6 +13,7 @@ type NovaNetwork = {
   cidr: string;
   gateway: string;
   bridge: string;
+  mode: 'bridge' | 'user';
   nat: boolean;
   createdAt: string;
   updatedAt: string;
@@ -44,6 +45,8 @@ type InstanceState = {
   mac: string;
   pidFile: string;
   qmpSocket: string;
+  networkMode: 'bridge' | 'user';
+  acceleration: 'kvm' | 'tcg';
   createdAt: string;
   updatedAt: string;
 };
@@ -203,33 +206,74 @@ function destroyTap(instance: InstanceState) {
   spawnSync('ip', ['link', 'del', instance.tap], { stdio: 'ignore' });
 }
 
+function canUseKvm() {
+  return fs.existsSync('/dev/kvm') && commandExists('qemu-system-x86_64');
+}
+
+function canUseTapBridge(bridge: string) {
+  if (!commandExists('ip') || bridge === 'user') return false;
+  if (spawnSync('ip', ['link', 'show', bridge], { stdio: 'ignore' }).status !== 0) return false;
+  if (!fs.existsSync('/dev/net/tun')) return false;
+  const probe = `nvprobe${process.pid}`;
+  const result = spawnSync('ip', ['tuntap', 'add', 'dev', probe, 'mode', 'tap'], { stdio: 'ignore' });
+  if (result.status !== 0) return false;
+  spawnSync('ip', ['link', 'del', probe], { stdio: 'ignore' });
+  return true;
+}
+
 function startInstance(instance: InstanceState) {
   if (pidFor(instance)) return currentState(instance);
   if (!commandExists('qemu-system-x86_64')) throw new Error('QEMU is not installed on this Nova host');
-  ensureTap(instance);
+
+  const acceleration: 'kvm' | 'tcg' = canUseKvm() ? 'kvm' : 'tcg';
+  const requestedBridge = instance.bridge || defaultBridge;
+  const useBridge = canUseTapBridge(requestedBridge);
+  const networkMode: 'bridge' | 'user' = useBridge ? 'bridge' : 'user';
+
+  if (useBridge) ensureTap(instance);
 
   const args = [
     '-daemonize',
     '-pidfile', instance.pidFile,
     '-qmp', `unix:${instance.qmpSocket},server=on,wait=off`,
     '-name', instance.name,
-    '-machine', 'q35,accel=kvm',
-    '-cpu', 'host',
+    '-machine', acceleration === 'kvm' ? 'q35,accel=kvm' : 'q35,accel=tcg',
+    '-cpu', acceleration === 'kvm' ? 'host' : 'max',
     '-smp', String(instance.vcpu),
     '-m', String(instance.memoryMb),
-    '-drive', `file=${instance.diskPath},if=virtio,format=qcow2,cache=none,aio=native`,
-    '-netdev', `tap,id=net0,ifname=${instance.tap},script=no,downscript=no`,
-    '-device', `virtio-net-pci,netdev=net0,mac=${instance.mac}`,
+    '-drive', `file=${instance.diskPath},if=virtio,format=qcow2,cache=none`,
     '-display', 'none',
     '-serial', 'none',
     '-nodefaults',
     '-no-reboot',
   ];
+
+  if (networkMode === 'bridge') {
+    args.push(
+      '-netdev', `tap,id=net0,ifname=${instance.tap},script=no,downscript=no`,
+      '-device', `virtio-net-pci,netdev=net0,mac=${instance.mac}`,
+    );
+  } else {
+    args.push(
+      '-netdev', 'user,id=net0,ipv6=off',
+      '-device', `virtio-net-pci,netdev=net0,mac=${instance.mac}`,
+    );
+  }
+
   if (instance.imagePath && fs.existsSync(instance.imagePath) && /\.iso$/i.test(instance.imagePath)) {
     args.push('-drive', `file=${instance.imagePath},media=cdrom,readonly=on`, '-boot', 'order=d');
   }
-  run('qemu-system-x86_64', args, 30000);
+
+  try {
+    run('qemu-system-x86_64', args, 30000);
+  } catch (error) {
+    if (useBridge) destroyTap(instance);
+    throw error;
+  }
+
   instance.status = 'Running';
+  instance.networkMode = networkMode;
+  instance.acceleration = acceleration;
   saveInstance(instance);
   return currentState(instance);
 }
@@ -245,7 +289,7 @@ function stopInstance(instance: InstanceState) {
     }
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
-  destroyTap(instance);
+  if (instance.networkMode === 'bridge') destroyTap(instance);
   try { fs.unlinkSync(instance.pidFile); } catch {}
   try { fs.unlinkSync(instance.qmpSocket); } catch {}
   instance.status = 'Stopped';
@@ -288,6 +332,9 @@ function hostFacts() {
       kvm: fs.existsSync('/dev/kvm'),
       qemu: commandExists('qemu-system-x86_64'),
       qemuImg: commandExists('qemu-img'),
+      acceleration: canUseKvm() ? 'kvm' : (commandExists('qemu-system-x86_64') ? 'tcg' : 'none'),
+      userNetworking: commandExists('qemu-system-x86_64'),
+      tapNetworking: canUseTapBridge(defaultBridge),
       nftables: commandExists('nft'),
       iproute2: commandExists('ip'),
       bridge: defaultBridge,
@@ -345,9 +392,7 @@ app.post('/v1/instances', (req, res) => {
       return res.status(400).json({ error: 'Instance resources are outside allowed limits' });
     }
     if (!/^[A-Za-z0-9_.:-]{1,32}$/.test(bridge)) return res.status(400).json({ error: 'Invalid bridge name' });
-    if (spawnSync('ip', ['link', 'show', bridge], { stdio: 'ignore' }).status !== 0) {
-      return res.status(400).json({ error: `Network bridge ${bridge} does not exist` });
-    }
+    const resolvedBridge = spawnSync('ip', ['link', 'show', bridge], { stdio: 'ignore' }).status === 0 ? bridge : 'user';
 
     const id = crypto.randomUUID();
     const diskPath = path.join(disksDir, `${id}.qcow2`);
@@ -369,11 +414,13 @@ app.post('/v1/instances', (req, res) => {
       diskGb,
       diskPath,
       imagePath,
-      bridge,
+      bridge: resolvedBridge,
       tap: `nv${id.replace(/-/g, '').slice(0, 10)}`,
       mac: '52:54:00:' + crypto.randomBytes(3).toString('hex').match(/.{2}/g)!.join(':'),
       pidFile: path.join(runDir, `${id}.pid`),
       qmpSocket: path.join(runDir, `${id}.qmp`),
+      networkMode: resolvedBridge === 'user' ? 'user' : 'bridge',
+      acceleration: canUseKvm() ? 'kvm' : 'tcg',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -503,19 +550,29 @@ app.post('/v1/networks', (req, res) => {
     if (listJson<NovaNetwork>(networksDir).some((item) => item.name === name || item.cidr === cidr)) {
       return res.status(409).json({ error: 'A network with that name or CIDR already exists' });
     }
+
     const id = crypto.randomUUID();
-    const bridge = `nvb${id.replace(/-/g, '').slice(0, 10)}`;
-    run('ip', ['link', 'add', 'name', bridge, 'type', 'bridge']);
-    try {
-      run('ip', ['addr', 'add', `${parsed.gateway}/${parsed.prefix}`, 'dev', bridge]);
-      run('ip', ['link', 'set', bridge, 'up']);
-      if (nat) ensureNatRule(cidr);
-    } catch (error) {
-      spawnSync('ip', ['link', 'del', bridge], { stdio: 'ignore' });
-      throw error;
+    const candidateBridge = `nvb${id.replace(/-/g, '').slice(0, 10)}`;
+    let bridge = 'user';
+    let mode: 'bridge' | 'user' = 'user';
+
+    if (commandExists('ip')) {
+      const create = spawnSync('ip', ['link', 'add', 'name', candidateBridge, 'type', 'bridge'], { stdio: 'ignore' });
+      if (create.status === 0) {
+        try {
+          run('ip', ['addr', 'add', `${parsed.gateway}/${parsed.prefix}`, 'dev', candidateBridge]);
+          run('ip', ['link', 'set', candidateBridge, 'up']);
+          if (nat) ensureNatRule(cidr);
+          bridge = candidateBridge;
+          mode = 'bridge';
+        } catch {
+          spawnSync('ip', ['link', 'del', candidateBridge], { stdio: 'ignore' });
+        }
+      }
     }
+
     const network: NovaNetwork = {
-      id, name, cidr, gateway: parsed.gateway, bridge, nat,
+      id, name, cidr, gateway: parsed.gateway, bridge, mode, nat,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -532,7 +589,9 @@ app.delete('/v1/networks/:id', (req, res) => {
     const network = readJson<NovaNetwork>(target);
     const inUse = listInstances().some((instance) => instance.bridge === network.bridge);
     if (inUse) return res.status(409).json({ error: 'Network is attached to one or more running or configured instances' });
-    spawnSync('ip', ['link', 'del', network.bridge], { stdio: 'ignore' });
+    if (network.mode === 'bridge' && network.bridge !== 'user') {
+      spawnSync('ip', ['link', 'del', network.bridge], { stdio: 'ignore' });
+    }
     fs.unlinkSync(target);
     res.status(204).end();
   } catch (error) {
