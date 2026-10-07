@@ -311,6 +311,7 @@ export interface MasterClusterSummary {
   sdnController: string;
   crossTenantIsolation: string;
   nodes: ClusterPhysicalNode[];
+  computeReady?: boolean;
 }
 
 export interface VlanNetworkMapping {
