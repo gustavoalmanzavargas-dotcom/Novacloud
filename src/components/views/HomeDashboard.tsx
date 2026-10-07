@@ -33,6 +33,31 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   themeMode,
 }) => {
   const isLight = themeMode === 'light';
+  const [agentState, setAgentState] = React.useState<{ connected: boolean; host?: any; error?: string }>({ connected: false });
+
+  React.useEffect(() => {
+    let active = true;
+    const loadHost = async () => {
+      try {
+        const response = await fetch('/api/nova/host');
+        const body = await response.json().catch(() => ({}));
+        if (!active) return;
+        setAgentState({
+          connected: response.ok && body?.connected === true,
+          host: body?.host,
+          error: response.ok ? undefined : body?.error,
+        });
+      } catch (error) {
+        if (active) setAgentState({ connected: false, error: error instanceof Error ? error.message : 'Nova Agent unavailable' });
+      }
+    };
+    loadHost();
+    const timer = window.setInterval(loadHost, 10000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
   const panel = isLight
     ? 'bg-white border-slate-200 text-slate-900'
     : 'bg-slate-900 border-slate-800 text-white';
@@ -55,14 +80,16 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
             </div>
             <h1 className="text-3xl font-bold mt-1">Welcome to Cyverax Nova</h1>
             <p className={`text-sm mt-2 ${muted}`}>
-              This installation is ready. Connect an infrastructure provider to import live resources.
+              {agentState.connected
+                ? `Nova compute is connected to ${agentState.host?.hostname || 'this host'} using ${String(agentState.host?.capabilities?.acceleration || 'Nova compute').toUpperCase()} acceleration.`
+                : 'Nova controller is online. Enable or connect Nova Agent to run compute workloads.'}
             </p>
           </div>
           <button
             onClick={onOpenCreateResource}
             className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs"
           >
-            <Plus className="w-4 h-4" /> Add provider or resource
+            <Plus className="w-4 h-4" /> Create Resource
           </button>
         </div>
       </section>
@@ -87,8 +114,12 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
         {vms.length === 0 ? (
           <div className="p-10 text-center">
             <Server className="w-9 h-9 mx-auto text-slate-500" />
-            <h3 className="font-semibold mt-3">No infrastructure connected</h3>
-            <p className={`text-sm mt-1 ${muted}`}>Your LXC installation contains no demonstration data.</p>
+            <h3 className="font-semibold mt-3">{agentState.connected ? 'Nova compute is ready' : 'Nova compute is not connected'}</h3>
+            <p className={`text-sm mt-1 ${muted}`}>
+              {agentState.connected
+                ? 'No virtual machines have been created yet. Use Create Resource or Compute → Launch Instance.'
+                : (agentState.error || 'Enable Nova Agent to create real compute, image, network, and storage resources.')}
+            </p>
           </div>
         ) : (
           <div className="divide-y divide-slate-700/30">
