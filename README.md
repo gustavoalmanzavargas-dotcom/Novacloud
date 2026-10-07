@@ -2,7 +2,44 @@
 
 > **Proprietary software — active development.** Cyverax Nova is not open source. Development/evaluation access does not grant production-use rights. A valid Cyverax Nova license is required for authorized production, commercial, or continued licensed use. See [LICENSE](LICENSE).
 
-Cyverax Nova is a self-hosted cloud-console application. A fresh installation starts with an empty PostgreSQL-backed inventory; it does not load demonstration infrastructure.
+Cyverax Nova is a self-hosted cloud platform with its own control plane, resource model, jobs, host protocol, and management UI.
+
+## Architecture
+
+NovaCloud is **not a Proxmox, VMware, Hyper-V, or public-cloud frontend**. The Nova UI communicates only with the Nova control API.
+
+```text
+NovaCloud UI
+    |
+Nova Control API + PostgreSQL
+    |
+Nova Scheduler / Jobs
+    |
+Nova Agent
+    |
+Linux host primitives
+KVM/QEMU | qcow2 | Linux bridge/TAP | nftables | filesystems
+```
+
+Nova owns the API contract, host registration, resource state, lifecycle operations, job tracking, audit records, image catalog, network model, storage model, permissions, and licensing. Linux/KVM/QEMU are execution primitives underneath Nova; no third-party cloud-management API is required by the control plane.
+
+## Current native compute foundation
+
+The Nova Agent currently provides:
+
+- real host capability and telemetry discovery
+- authenticated controller-to-agent communication
+- local KVM/QEMU VM creation
+- qcow2 disk creation
+- start, stop, shutdown, reboot, and delete
+- Nova-managed TAP interfaces attached to a Nova bridge
+- local image inventory and HTTP/HTTPS image import
+- qcow2 snapshot creation/list/rollback for stopped VMs
+- Nova host registration and last-seen telemetry in PostgreSQL
+- Nova job records for long-running/control operations
+- audit events for compute lifecycle actions
+
+The controller can run separately from compute hosts. A compute host needs `/dev/kvm` for hardware-accelerated VM execution.
 
 ## Licensing
 
@@ -10,39 +47,50 @@ NovaCloud is privately developed proprietary software. Source availability in th
 
 The current builds are for authorized development and testing. Production, commercial, enterprise, hosted-service, redistribution, and other operational use require a valid license or separate written authorization from the software owner.
 
-License enforcement, editions, feature entitlements, instance limits, subscription terms, and commercial pricing may be introduced or changed as development continues.
+## Install the Nova controller
 
-## One-command LXC installation
-
-Use a clean Debian 12 or Debian 13 LXC with at least 2 CPU cores, 4 GB RAM, 20 GB storage, systemd, working DNS, and Internet access.
+Use Debian 12 or Debian 13 with at least 2 CPU cores, 4 GB RAM, 20 GB storage, systemd, working DNS, and Internet access.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novacloud/main/bootstrap.sh | sudo bash
 ```
 
-The bootstrap command downloads the current authorized build and launches the interactive installer. Run it directly from the LXC console or an SSH session.
+The controller installer configures PostgreSQL, the Nova API/UI service, authentication, Nginx, and optionally a Nova Agent endpoint.
 
-## Create the LXC from a Proxmox node
-
-Run this command as root on a Proxmox VE node:
+### Manual controller installation
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/gustavoalmanzavargas-dotcom/Novacloud/main/proxmox/create-lxc.sh)"
+apt update && apt install -y git
+git clone https://github.com/gustavoalmanzavargas-dotcom/Novacloud.git
+cd Novacloud
+sudo bash install.sh
 ```
 
-The helper creates an unprivileged Debian 13 LXC and asks for its VMID, storage, bridge, VLAN, DHCP or static network configuration, resources, and Nova administrator account. It then installs and starts Nova inside the container.
+## Install a Nova compute agent
 
-### Manual installation
+Run this on a Debian-based Linux compute host where KVM is available:
 
 ```bash
-apt update && apt install -y git && \
-git clone https://github.com/gustavoalmanzavargas-dotcom/Novacloud.git && \
-cd Novacloud && sudo bash install.sh
+cd /opt/novacloud
+sudo bash scripts/install-nova-agent.sh
 ```
 
-The installer asks for the web hostname, administrator account, optional Gemini key, and optional HTTPS. It automatically installs Node.js, PostgreSQL, Nginx, the database schema, the Nova service, and Let's Encrypt when selected.
+The script installs the Nova-owned agent service and the low-level Linux virtualization dependencies, creates the default `novabr0` network, enables forwarding/NAT for the development network, and prints the controller URL/token settings.
 
-## Update an installed instance
+Configure the controller with:
+
+```bash
+NOVA_AGENT_URL=http://COMPUTE-HOST-IP:9443
+NOVA_AGENT_TOKEN=THE-TOKEN-PRINTED-BY-THE-AGENT-INSTALLER
+```
+
+Keep the agent token secret. It grants host-control authority.
+
+## Optional controller LXC helper
+
+The repository includes `proxmox/create-lxc.sh` only as a convenience for creating the **Nova controller LXC** on an existing Proxmox host. Proxmox is not a Nova runtime provider and Nova does not use the Proxmox API to manage workloads.
+
+## Update an installed controller
 
 ```bash
 cd /opt/novacloud
@@ -60,4 +108,11 @@ systemctl status novacloud --no-pager
 journalctl -u novacloud -n 100 --no-pager
 curl http://127.0.0.1:3000/api/health
 nginx -t
+```
+
+For a compute host:
+
+```bash
+systemctl status nova-agent --no-pager
+journalctl -u nova-agent -n 100 --no-pager
 ```
