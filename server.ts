@@ -320,6 +320,280 @@ app.get('/api/hosts', requireAuth, async (_req, res) => {
   res.json(result.rows);
 });
 
+function bytesToGb(value: unknown) {
+  return Number((Number(value || 0) / 1024 ** 3).toFixed(2));
+}
+
+async function getNovaClusterSummary() {
+  const hosts = await pool.query(
+    `SELECT id, agent_id, name, endpoint, status, capabilities, telemetry, last_seen_at
+       FROM nova_hosts ORDER BY name ASC`,
+  );
+  const tenants = await pool.query(
+    `SELECT id, data FROM resources WHERE type = 'tenant' AND provider = 'nova-native' ORDER BY created_at DESC`,
+  );
+  const vms = await pool.query(
+    `SELECT data FROM resources WHERE type = 'vm' AND provider = 'nova-native'`,
+  );
+  const networks = await pool.query(
+    `SELECT data FROM resources WHERE type = 'network' AND provider = 'nova-native'`,
+  );
+  const volumes = await pool.query(
+    `SELECT data FROM resources WHERE type = 'storage' AND provider = 'nova-native'`,
+  );
+
+  const now = Date.now();
+  const normalizedHosts = hosts.rows.map((row: any) => {
+    const telemetry = row.telemetry || {};
+    const lastSeen = row.last_seen_at ? new Date(row.last_seen_at).getTime() : 0;
+    const online = row.status === 'online' && lastSeen > now - 30000;
+    return {
+      id: row.id,
+      name: row.name,
+      status: online ? 'Online' : 'Degraded',
+      cpuModel: String(telemetry.cpuModel || 'Unknown'),
+      totalCores: Number(telemetry.cpuCount || 0),
+      allocatedCores: 0,
+      totalRamGb: bytesToGb(telemetry.memory?.totalBytes),
+      allocatedRamGb: 0,
+      gpuUnits: Array.isArray(telemetry.gpus) ? telemetry.gpus : [],
+      allocatedGpus: 0,
+      storageNvmeTb: Number((Number(telemetry.storage?.totalBytes || 0) / 1024 ** 4).toFixed(2)),
+      temperatureC: 0,
+      uptimeDays: Number((Number(telemetry.uptimeSeconds || 0) / 86400).toFixed(1)),
+      capabilities: row.capabilities || {},
+      lastSeenAt: row.last_seen_at,
+    };
+  });
+
+  const allocatedVcpu = vms.rows.reduce((sum: number, row: any) => sum + Number(row.data?.vcpu || 0), 0);
+  const allocatedRamGb = vms.rows.reduce((sum: number, row: any) => sum + Number(row.data?.memoryGb || 0), 0);
+  const allocatedStorageTb = volumes.rows.reduce((sum: number, row: any) => sum + Number(row.data?.capacityGb || row.data?.sizeGb || 0), 0) / 1024;
+  const totalPhysicalCores = normalizedHosts.reduce((sum: number, host: any) => sum + host.totalCores, 0);
+  const totalRamGb = normalizedHosts.reduce((sum: number, host: any) => sum + host.totalRamGb, 0);
+  const totalStorageTb = normalizedHosts.reduce((sum: number, host: any) => sum + host.storageNvmeTb, 0);
+  const totalGpus = normalizedHosts.reduce((sum: number, host: any) => sum + host.gpuUnits.length, 0);
+  const onlineNodes = normalizedHosts.filter((host: any) => host.status === 'Online').length;
+
+  return {
+    clusterName: 'NovaCloud',
+    location: 'Local',
+    hypervisor: 'Nova Native KVM/QEMU',
+    networkFabric: networks.rows.length ? 'Nova Linux Bridge/NAT' : 'Not configured',
+    status: onlineNodes > 0 ? 'Healthy' : 'Degraded',
+    totalNodes: normalizedHosts.length,
+    onlineNodes,
+    totalPhysicalCores,
+    allocatedVcpu,
+    totalRamGb,
+    allocatedRamGb,
+    totalGpus,
+    allocatedGpus: 0,
+    totalStorageTb: Number(totalStorageTb.toFixed(2)),
+    allocatedStorageTb: Number(allocatedStorageTb.toFixed(2)),
+    totalClients: tenants.rows.length,
+    activeVlansCount: networks.rows.length,
+    vlanRange: 'Nova managed',
+    sdnController: 'Nova Networking',
+    crossTenantIsolation: networks.rows.length ? 'Nova bridge isolation enabled' : 'Not configured',
+    nodes: normalizedHosts,
+    computeReady: onlineNodes > 0,
+  };
+}
+
+app.get('/api/cluster/summary', requireAuth, async (_req, res) => {
+  try {
+    if (novaAgentConfigured()) {
+      try { await syncNovaAgentInventory(); } catch {}
+    }
+    res.json(await getNovaClusterSummary());
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to read Nova cluster state' });
+  }
+});
+
+app.get('/api/clients', requireAuth, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT id, data, created_at, updated_at
+       FROM resources
+       WHERE type = 'tenant' AND provider = 'nova-native'
+       ORDER BY created_at DESC`,
+  );
+  res.json(result.rows.map((row: any) => ({ id: row.id, ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })));
+});
+
+app.get('/api/clients/:id', requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, data, created_at, updated_at FROM resources
+       WHERE id = $1 AND type = 'tenant' AND provider = 'nova-native' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Client instance not found' });
+  const row = result.rows[0];
+  res.json({ id: row.id, ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at });
+});
+
+app.post('/api/clients', requireAuth, async (req, res) => {
+  const company = String(req.body?.clientCompany || '').trim();
+  const email = String(req.body?.clientEmail || '').trim();
+  const name = String(req.body?.name || company).trim();
+  const vCpu = Number(req.body?.vCpu || 2);
+  const ramGb = Number(req.body?.ramGb || 4);
+  const storageGb = Number(req.body?.storageGb || 32);
+  const bandwidthLimitMbps = Number(req.body?.bandwidthLimitMbps || 1000);
+  if (!company || !email || !name) return res.status(400).json({ error: 'Company, contact email, and instance name are required' });
+  if (!novaAgentConfigured()) return res.status(503).json({ error: 'Nova compute host is not connected. Install and connect Nova Agent before deploying client instances.' });
+
+  let host: any;
+  try {
+    host = await novaAgentRequest('/v1/host');
+  } catch (error) {
+    return res.status(503).json({ error: error instanceof Error ? error.message : 'Nova compute host is unavailable' });
+  }
+  if (!host?.capabilities?.kvm || !host?.capabilities?.qemu) {
+    return res.status(409).json({ error: 'Connected Nova host is not compute-ready: KVM/QEMU capability is required.' });
+  }
+
+  const count = await pool.query(`SELECT COUNT(*)::int AS count FROM resources WHERE type = 'tenant' AND provider = 'nova-native'`);
+  const index = Number(count.rows[0]?.count || 0) + 20;
+  const cidr = `10.200.${index % 240}.0/24`;
+  const networkName = `tenant-${company.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || Date.now()}`;
+  const jobId = await createJob('tenant.deploy', req.session.userId, 'tenant', null, { company, email, name, vCpu, ramGb, storageGb, cidr });
+
+  let network: any = null;
+  let vm: any = null;
+  try {
+    network = await novaAgentRequest('/v1/networks', 'POST', { name: networkName, cidr, nat: true });
+    vm = await novaAgentRequest('/v1/instances', 'POST', {
+      name: name.replace(/\s+/g, '-').slice(0, 63),
+      vcpu: vCpu,
+      memoryMb: Math.round(ramGb * 1024),
+      diskGb: storageGb,
+      bridge: network.bridge,
+      start: true,
+    });
+
+    const tenant = {
+      name,
+      clientCompany: company,
+      clientEmail: email,
+      status: vm.status === 'Running' ? 'Active' : 'Provisioning',
+      plan: String(req.body?.plan || 'Starter'),
+      monthlyBilling: 0,
+      clusterNodeId: String(host.hostname || host.id || 'nova-host'),
+      vlanId: 0,
+      vxlanVni: 0,
+      vpcCidr: network.cidr,
+      isolatedSubnet: network.cidr,
+      virtualGateway: network.gateway,
+      natGatewayIp: 'Host NAT',
+      dnsServers: [],
+      firewallRulesCount: 0,
+      isolationStatus: 'Nova bridge isolated',
+      vCpuAllocated: vCpu,
+      vCpuMaxQuota: vCpu,
+      ramGbAllocated: ramGb,
+      ramGbMaxQuota: ramGb,
+      gpuAllocated: String(req.body?.gpu || 'None'),
+      storageGbAllocated: storageGb,
+      bandwidthLimitMbps,
+      cpuUsagePct: 0,
+      ramUsagePct: 0,
+      storageUsedGb: 0,
+      activeWorkloadsCount: vm.status === 'Running' ? 1 : 0,
+      networkThroughputMbps: 0,
+      installedApps: [],
+      networkId: network.id,
+      vmId: vm.id,
+      createdAt: new Date().toISOString(),
+    };
+    const saved = await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('tenant', 'nova-native', $1, $2)
+       RETURNING id, data, created_at, updated_at`,
+      [`tenant:${vm.id}`, tenant],
+    );
+    await finishJob(jobId, 'succeeded', { tenantId: saved.rows[0].id, networkId: network.id, vmId: vm.id });
+    await syncNovaAgentInventory();
+    const row = saved.rows[0];
+    res.status(201).json({ id: row.id, ...row.data, updatedAt: row.updated_at });
+  } catch (error) {
+    if (vm?.id) {
+      try { await novaAgentRequest(`/v1/instances/${encodeURIComponent(vm.id)}`, 'DELETE'); } catch {}
+    }
+    if (network?.id) {
+      try { await novaAgentRequest(`/v1/networks/${encodeURIComponent(network.id)}`, 'DELETE'); } catch {}
+    }
+    const message = error instanceof Error ? error.message : 'Client deployment failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.patch('/api/clients/:id/resources', requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'tenant' AND provider = 'nova-native' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Client instance not found' });
+  const tenant = result.rows[0].data || {};
+  const requestedVcpu = Number(req.body?.vCpu ?? tenant.vCpuAllocated);
+  const requestedRam = Number(req.body?.ramGb ?? tenant.ramGbAllocated);
+  const requestedStorage = Number(req.body?.storageGb ?? tenant.storageGbAllocated);
+  if (requestedVcpu !== Number(tenant.vCpuAllocated) || requestedRam !== Number(tenant.ramGbAllocated) || requestedStorage !== Number(tenant.storageGbAllocated)) {
+    return res.status(409).json({ error: 'Live tenant VM resize is not enabled yet. Nova will not report a resource change that was not applied to the VM.' });
+  }
+  res.json({ id: result.rows[0].id, ...tenant });
+});
+
+app.post('/api/clients/:id/action', requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'tenant' AND provider = 'nova-native' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Client instance not found' });
+  const tenant = result.rows[0].data || {};
+  const requested = String(req.body?.action || '');
+  if (requested === 'isolate') return res.status(409).json({ error: 'Additional tenant isolation controls are not enabled yet.' });
+  const action = requested === 'restart' ? 'reboot' : requested;
+  if (!['start', 'stop', 'reboot'].includes(action)) return res.status(400).json({ error: 'Unsupported client action' });
+  if (!tenant.vmId) return res.status(409).json({ error: 'Client instance is missing its Nova VM reference' });
+  try {
+    const vm = await novaAgentRequest(`/v1/instances/${encodeURIComponent(tenant.vmId)}/action`, 'POST', { action });
+    tenant.status = vm.status === 'Running' ? 'Active' : 'Suspended';
+    tenant.activeWorkloadsCount = vm.status === 'Running' ? 1 : 0;
+    await pool.query(`UPDATE resources SET data = $2, updated_at = NOW() WHERE id = $1`, [req.params.id, tenant]);
+    res.json({ id: req.params.id, ...tenant });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Client action failed' });
+  }
+});
+
+app.delete('/api/clients/:id', requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, data FROM resources WHERE id = $1 AND type = 'tenant' AND provider = 'nova-native' LIMIT 1`,
+    [req.params.id],
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Client instance not found' });
+  const tenant = result.rows[0].data || {};
+  try {
+    if (tenant.vmId) await novaAgentRequest(`/v1/instances/${encodeURIComponent(tenant.vmId)}`, 'DELETE');
+    if (tenant.networkId) await novaAgentRequest(`/v1/networks/${encodeURIComponent(tenant.networkId)}`, 'DELETE');
+    await pool.query(`DELETE FROM resources WHERE id = $1`, [req.params.id]);
+    res.status(204).end();
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Client deprovision failed' });
+  }
+});
+
+app.get('/api/marketplace/catalog', requireAuth, async (_req, res) => {
+  res.json({ total: 0, apps: [], gpuOptions: [] });
+});
+
+app.post('/api/marketplace/install', requireAuth, async (_req, res) => {
+  res.status(409).json({ error: 'Nova application marketplace installation is not enabled yet.' });
+});
+
 app.get('/api/nova/host', requireAuth, async (_req, res) => {
   try {
     const host = await novaAgentRequest('/v1/host');

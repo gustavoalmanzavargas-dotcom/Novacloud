@@ -252,7 +252,7 @@ export interface ClientTenantInstance {
   natGatewayIp: string;
   dnsServers: string[];
   firewallRulesCount: number;
-  isolationStatus: 'Strictly Isolated (0 Crosstalk)';
+  isolationStatus: string;
   // Master Allocated Resources
   vCpuAllocated: number;
   vCpuMaxQuota: number;
@@ -309,8 +309,9 @@ export interface MasterClusterSummary {
   activeVlansCount: number;
   vlanRange: string;
   sdnController: string;
-  crossTenantIsolation: '100% Enforced (Hardware EVPN/VXLAN)';
+  crossTenantIsolation: string;
   nodes: ClusterPhysicalNode[];
+  computeReady?: boolean;
 }
 
 export interface VlanNetworkMapping {
@@ -324,7 +325,7 @@ export interface VlanNetworkMapping {
   natGateway: string;
   attachedNodes: string[];
   activeIpAddresses: string[];
-  firewallPolicy: 'Default Deny Inter-VLAN + Stateful Outbound NAT';
-  isolationCheck: 'Verified PASS';
+  firewallPolicy: string;
+  isolationCheck: string;
   lastPacketLossPct: number;
 }
