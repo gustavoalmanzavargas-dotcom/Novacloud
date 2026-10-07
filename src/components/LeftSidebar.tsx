@@ -268,15 +268,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               >
 
                 <button
-                  id="nav-sub-containers-btn"
-                  onClick={() => onNavigate('containers')}
-                  className={`w-full text-left px-2 py-1 text-[11px] rounded transition-colors cursor-pointer ${getSubItemClass(
-                    activeView === 'containers'
-                  )}`}
-                >
-                  Containers
-                </button>
-                <button
                   id="nav-sub-vms-btn"
                   onClick={() => onNavigate('compute', 'vms')}
                   className={`w-full text-left px-2 py-1 text-[11px] rounded transition-colors cursor-pointer ${getSubItemClass(
@@ -346,7 +337,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
             >
               <div className="flex items-center gap-3">
                 <Boxes className="w-4 h-4 shrink-0 text-indigo-500" />
-                {!collapsedState && <span>Applications</span>}
+                {!collapsedState && <span>Applications & Containers</span>}
               </div>
               {!collapsedState && (
                 <div className="flex items-center gap-1.5">
@@ -370,6 +361,15 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                   isLight ? 'border-slate-200' : 'border-slate-800'
                 }`}
               >
+                <button
+                  id="nav-sub-containers-btn"
+                  onClick={() => onNavigate('containers')}
+                  className={`w-full text-left px-2 py-1 text-[11px] rounded transition-colors cursor-pointer ${getSubItemClass(
+                    activeView === 'containers'
+                  )}`}
+                >
+                  Containers
+                </button>
                 <button
                   id="nav-sub-workloads-btn"
                   onClick={() => onNavigate('applications', 'workloads')}
