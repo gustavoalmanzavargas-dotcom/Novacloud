@@ -6,11 +6,10 @@ import pg from 'pg';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
-import http from 'http';
-import https from 'https';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import { novaAgentConfigured, novaAgentRequest } from './server/novaAgentClient';
 
 dotenv.config();
 
@@ -30,171 +29,111 @@ const PgStore = connectPgSimple(session);
 const app = express();
 const port = Number(process.env.PORT || 3000);
 
-const proxmoxHost = String(process.env.PROXMOX_HOST || '').replace(/\/$/, '');
-const proxmoxTokenId = String(process.env.PROXMOX_TOKEN_ID || '');
-const proxmoxTokenSecret = String(process.env.PROXMOX_TOKEN_SECRET || '');
-const proxmoxVerifyTls = process.env.PROXMOX_VERIFY_TLS !== 'false';
-let lastProxmoxSyncAt = 0;
-let proxmoxSyncPromise: Promise<void> | null = null;
+const novaAgentUrl = String(process.env.NOVA_AGENT_URL || 'http://127.0.0.1:9443');
 
-function proxmoxConfigured() {
-  return Boolean(proxmoxHost && proxmoxTokenId && proxmoxTokenSecret);
-}
+async function syncNovaAgentInventory() {
+  if (!novaAgentConfigured()) return;
+  const [host, instances, images] = await Promise.all([
+    novaAgentRequest('/v1/host'),
+    novaAgentRequest('/v1/instances'),
+    novaAgentRequest('/v1/images'),
+  ]);
 
-function proxmoxRequest(pathname: string, method = 'GET', body?: Record<string, string | number | boolean>): Promise<any> {
-  if (!proxmoxConfigured()) {
-    return Promise.reject(new Error('Proxmox provider is not configured'));
-  }
-  const target = new URL(pathname, proxmoxHost.endsWith('/') ? proxmoxHost : `${proxmoxHost}/`);
-  const transport = target.protocol === 'http:' ? http : https;
-  const encoded = body
-    ? new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)])).toString()
-    : '';
-
-  return new Promise((resolve, reject) => {
-    const request = transport.request(target, {
-      method,
-      headers: {
-        Authorization: `PVEAPIToken=${proxmoxTokenId}=${proxmoxTokenSecret}`,
-        Accept: 'application/json',
-        ...(encoded ? {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Content-Length': Buffer.byteLength(encoded),
-        } : {}),
-      },
-      ...(target.protocol === 'https:' ? { rejectUnauthorized: proxmoxVerifyTls } : {}),
-    }, (response) => {
-      let responseBody = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => { responseBody += chunk; });
-      response.on('end', () => {
-        if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-          let detail = responseBody;
-          try {
-            detail = JSON.stringify(JSON.parse(responseBody)?.errors || JSON.parse(responseBody)?.message || responseBody);
-          } catch {}
-          reject(new Error(`Proxmox API returned HTTP ${response.statusCode || 0}${detail ? `: ${detail}` : ''}`));
-          return;
-        }
-        if (!responseBody.trim()) {
-          resolve(null);
-          return;
-        }
-        try {
-          resolve(JSON.parse(responseBody)?.data ?? null);
-        } catch {
-          resolve(responseBody);
-        }
-      });
-    });
-    request.setTimeout(30000, () => request.destroy(new Error('Proxmox API request timed out')));
-    request.on('error', reject);
-    if (encoded) request.write(encoded);
-    request.end();
-  });
-}
-
-function proxmoxGet(pathname: string): Promise<any> {
-  return proxmoxRequest(pathname, 'GET');
-}
-
-async function upsertProviderResource(type: string, externalId: string, data: Record<string, unknown>) {
-  await pool.query(
-    `INSERT INTO resources (type, provider, external_id, data)
-     VALUES ($1, 'proxmox', $2, $3)
-     ON CONFLICT (provider, external_id)
-     DO UPDATE SET type = EXCLUDED.type, data = EXCLUDED.data, updated_at = NOW()`,
-    [type, externalId, data],
+  const hostResult = await pool.query(
+    `INSERT INTO nova_hosts (agent_id, name, endpoint, status, capabilities, telemetry, last_seen_at)
+     VALUES ($1, $2, $3, 'online', $4, $5, NOW())
+     ON CONFLICT (agent_id)
+     DO UPDATE SET name = EXCLUDED.name, endpoint = EXCLUDED.endpoint, status = 'online',
+                   capabilities = EXCLUDED.capabilities, telemetry = EXCLUDED.telemetry,
+                   last_seen_at = NOW(), updated_at = NOW()
+     RETURNING id`,
+    [host.id, host.hostname, novaAgentUrl, host.capabilities || {}, host],
   );
+  const hostId = hostResult.rows[0]?.id;
+
+  const instanceIds: string[] = [];
+  for (const item of Array.isArray(instances) ? instances : []) {
+    instanceIds.push(item.id);
+    const memoryGb = Number((Number(item.memoryMb || 0) / 1024).toFixed(2));
+    const data = {
+      id: item.id,
+      name: item.name,
+      status: item.status,
+      os: 'Nova VM',
+      vcpu: Number(item.vcpu || 0),
+      memoryGb,
+      storageGb: Number(item.diskGb || 0),
+      privateIp: '—',
+      publicIp: '—',
+      region: 'local',
+      environment: 'Production',
+      vpc: item.bridge || 'novabr0',
+      subnet: 'Nova managed',
+      securityPolicy: 'Nova host policy',
+      hostname: item.name,
+      created: item.createdAt,
+      uptime: item.status === 'Running' ? 'Running' : '0h',
+      cpuUsagePct: 0,
+      memUsagePct: 0,
+      diskIops: 0,
+      networkInMb: 0,
+      networkOutMb: 0,
+      tags: {
+        provider: 'nova-native',
+        hostId: String(hostId || ''),
+        agentId: String(host.id || ''),
+      },
+      attachedDisks: [{ name: 'root', sizeGb: Number(item.diskGb || 0), type: 'qcow2', mount: '/' }],
+      snapshots: [],
+    };
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('vm', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [item.id, data],
+    );
+  }
+
+  if (instanceIds.length > 0) {
+    await pool.query(
+      `DELETE FROM resources
+       WHERE provider = 'nova-native' AND type = 'vm'
+         AND NOT (external_id = ANY($1::text[]))`,
+      [instanceIds],
+    );
+  } else {
+    await pool.query(`DELETE FROM resources WHERE provider = 'nova-native' AND type = 'vm'`);
+  }
+
+  for (const image of Array.isArray(images) ? images : []) {
+    await pool.query(
+      `INSERT INTO resources (type, provider, external_id, data)
+       VALUES ('image', 'nova-native', $1, $2)
+       ON CONFLICT (provider, external_id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [image.id, image],
+    );
+  }
 }
 
-async function syncProxmoxInventory(force = false) {
-  if (!proxmoxConfigured()) return;
-  if (!force && Date.now() - lastProxmoxSyncAt < 30000) return;
-  if (proxmoxSyncPromise) return proxmoxSyncPromise;
+async function createJob(kind: string, userId: string | undefined, resourceType: string | null, resourceId: string | null, input: any) {
+  const result = await pool.query(
+    `INSERT INTO jobs (kind, resource_type, resource_id, requested_by, status, input)
+     VALUES ($1, $2, $3, $4, 'running', $5)
+     RETURNING id`,
+    [kind, resourceType, resourceId, userId || null, input || {}],
+  );
+  return result.rows[0].id as string;
+}
 
-  proxmoxSyncPromise = (async () => {
-    const [compute, storage] = await Promise.all([
-      proxmoxGet('/api2/json/cluster/resources?type=vm'),
-      proxmoxGet('/api2/json/cluster/resources?type=storage'),
-    ]);
-
-    const computeIds: string[] = [];
-    for (const item of Array.isArray(compute) ? compute : []) {
-      const externalId = `${item.type || 'vm'}:${item.vmid}`;
-      computeIds.push(externalId);
-      const maxMem = Number(item.maxmem || 0);
-      const usedMem = Number(item.mem || 0);
-      await upsertProviderResource('vm', externalId, {
-        id: `proxmox-${item.vmid}`,
-        name: item.name || `VM ${item.vmid}`,
-        status: item.status === 'running' ? 'Running' : 'Stopped',
-        os: item.type === 'lxc' ? 'Linux Container' : 'Virtual Machine',
-        vcpu: Number(item.maxcpu || item.cpus || 0),
-        memoryGb: Number((maxMem / 1024 ** 3).toFixed(2)),
-        storageGb: Number((Number(item.maxdisk || 0) / 1024 ** 3).toFixed(2)),
-        privateIp: '—',
-        publicIp: '—',
-        region: 'local',
-        environment: 'Production',
-        vpc: item.node || 'proxmox',
-        subnet: '—',
-        securityPolicy: 'Proxmox',
-        hostname: item.name || String(item.vmid),
-        created: '—',
-        uptime: Number(item.uptime || 0) > 0 ? `${Math.floor(Number(item.uptime) / 3600)}h` : '0h',
-        cpuUsagePct: Number((Number(item.cpu || 0) * 100).toFixed(1)),
-        memUsagePct: maxMem > 0 ? Number(((usedMem / maxMem) * 100).toFixed(1)) : 0,
-        diskIops: 0,
-        networkInMb: Number((Number(item.netin || 0) / 1024 ** 2).toFixed(1)),
-        networkOutMb: Number((Number(item.netout || 0) / 1024 ** 2).toFixed(1)),
-        tags: {
-          provider: 'proxmox',
-          node: String(item.node || ''),
-          kind: String(item.type || ''),
-          vmid: String(item.vmid || ''),
-        },
-        attachedDisks: [],
-        snapshots: [],
-      });
-    }
-
-    const storageIds: string[] = [];
-    for (const item of Array.isArray(storage) ? storage : []) {
-      const externalId = `${item.node || 'cluster'}:${item.storage || item.id}`;
-      storageIds.push(externalId);
-      await upsertProviderResource('storage', externalId, {
-        id: `proxmox-storage-${String(item.storage || item.id).replace(/[^a-zA-Z0-9_-]/g, '-')}`,
-        name: item.storage || item.id || 'Proxmox storage',
-        type: 'Block Storage',
-        capacityGb: Number((Number(item.maxdisk || 0) / 1024 ** 3).toFixed(2)),
-        usedGb: Number((Number(item.disk || 0) / 1024 ** 3).toFixed(2)),
-        region: item.node || 'cluster',
-        status: 'Healthy',
-        attachedResource: item.node || 'cluster',
-        created: '—',
-      });
-    }
-
-    await pool.query(
-      `DELETE FROM resources
-       WHERE provider = 'proxmox' AND type = 'vm'
-         AND NOT (external_id = ANY($1::text[]))`,
-      [computeIds],
-    );
-    await pool.query(
-      `DELETE FROM resources
-       WHERE provider = 'proxmox' AND type = 'storage'
-         AND NOT (external_id = ANY($1::text[]))`,
-      [storageIds],
-    );
-
-    lastProxmoxSyncAt = Date.now();
-  })().finally(() => {
-    proxmoxSyncPromise = null;
-  });
-
-  return proxmoxSyncPromise;
+async function finishJob(id: string, status: 'succeeded' | 'failed', output: any, error?: string) {
+  await pool.query(
+    `UPDATE jobs
+     SET status = $2, output = $3, error = $4, finished_at = NOW(), updated_at = NOW()
+     WHERE id = $1`,
+    [id, status, output || {}, error || null],
+  );
 }
 
 app.set('trust proxy', 1);
@@ -261,311 +200,191 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-app.get('/api/providers/proxmox/status', requireAuth, async (_req, res) => {
-  if (!proxmoxConfigured()) {
-    return res.json({ configured: false, connected: false, lastSyncAt: null });
-  }
+app.get('/api/nova/host', requireAuth, async (_req, res) => {
   try {
-    const version = await proxmoxGet('/api2/json/version');
-    res.json({
-      configured: true,
-      connected: true,
-      host: proxmoxHost,
-      version,
-      lastSyncAt: lastProxmoxSyncAt ? new Date(lastProxmoxSyncAt).toISOString() : null,
-    });
+    const host = await novaAgentRequest('/v1/host');
+    await syncNovaAgentInventory();
+    res.json({ configured: true, connected: true, host });
   } catch (error) {
     res.status(502).json({
-      configured: true,
+      configured: novaAgentConfigured(),
       connected: false,
-      host: proxmoxHost,
-      error: error instanceof Error ? error.message : 'Unable to reach Proxmox',
-      lastSyncAt: lastProxmoxSyncAt ? new Date(lastProxmoxSyncAt).toISOString() : null,
+      error: error instanceof Error ? error.message : 'Nova Agent unavailable',
     });
   }
 });
 
-app.post('/api/providers/proxmox/sync', requireAuth, async (_req, res) => {
-  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
+app.post('/api/nova/sync', requireAuth, async (_req, res) => {
   try {
-    await syncProxmoxInventory(true);
-    res.json({ success: true, syncedAt: new Date(lastProxmoxSyncAt).toISOString() });
+    await syncNovaAgentInventory();
+    res.json({ success: true, syncedAt: new Date().toISOString() });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Proxmox sync failed' });
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Nova Agent sync failed' });
   }
 });
 
 app.get('/api/compute/options', requireAuth, async (_req, res) => {
-  if (!proxmoxConfigured()) return res.json({ configured: false, nodes: [], storages: [], bridges: [], nextId: null });
   try {
-    const [nodes, nextId] = await Promise.all([
-      proxmoxGet('/api2/json/nodes'),
-      proxmoxGet('/api2/json/cluster/nextid'),
-    ]);
-    const nodeNames = (Array.isArray(nodes) ? nodes : []).map((item: any) => String(item.node || '')).filter(Boolean);
-    const storages: any[] = [];
-    const bridges = new Set<string>();
-    for (const node of nodeNames) {
-      const [nodeStorages, network] = await Promise.all([
-        proxmoxGet(`/api2/json/nodes/${encodeURIComponent(node)}/storage`),
-        proxmoxGet(`/api2/json/nodes/${encodeURIComponent(node)}/network`),
-      ]);
-      for (const storage of Array.isArray(nodeStorages) ? nodeStorages : []) {
-        const content = String(storage.content || '');
-        if (Number(storage.active ?? 1) === 1 && (content.includes('images') || content.includes('rootdir'))) {
-          storages.push({ node, storage: storage.storage, content, type: storage.type });
-        }
-      }
-      for (const nic of Array.isArray(network) ? network : []) {
-        if (nic.type === 'bridge' && nic.iface) bridges.add(String(nic.iface));
-      }
-    }
-    res.json({ configured: true, nodes: nodeNames, storages, bridges: Array.from(bridges), nextId: Number(nextId) || null });
+    const host = await novaAgentRequest('/v1/host');
+    const images = await novaAgentRequest('/v1/images');
+    res.json({
+      configured: true,
+      hosts: [{ id: host.id, name: host.hostname }],
+      nodes: [host.hostname],
+      storages: [{ node: host.hostname, storage: 'nova-local', type: 'qcow2' }],
+      bridges: [host.capabilities?.bridge || 'novabr0'],
+      images,
+    });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Proxmox creation options' });
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read Nova host options' });
   }
 });
 
 app.post('/api/compute/vms', requireAuth, async (req, res) => {
-  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
   const name = String(req.body?.name || '').trim();
-  const node = String(req.body?.node || '').trim();
-  const storage = String(req.body?.storage || '').trim();
-  const bridge = String(req.body?.bridge || 'vmbr0').trim();
-  const iso = String(req.body?.iso || '').trim();
-  const osType = String(req.body?.osType || 'l26').trim();
-  const vmid = Number(req.body?.vmid || await proxmoxGet('/api2/json/cluster/nextid'));
-  const cores = Number(req.body?.cores || 2);
+  const cores = Number(req.body?.cores || req.body?.vcpu || 2);
   const memoryMb = Number(req.body?.memoryMb || 4096);
   const diskGb = Number(req.body?.diskGb || 32);
+  const bridge = String(req.body?.bridge || 'novabr0');
+  const imageId = String(req.body?.imageId || req.body?.iso || '');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid VM name is required' });
-  if (!node || !storage || !bridge || !Number.isInteger(vmid)) return res.status(400).json({ error: 'Node, storage, bridge, and VM ID are required' });
-  if (cores < 1 || cores > 256 || memoryMb < 512 || diskGb < 4) return res.status(400).json({ error: 'VM resources are outside allowed limits' });
 
+  const jobId = await createJob('compute.create', req.session.userId, 'vm', null, { name, cores, memoryMb, diskGb, bridge, imageId });
   try {
-    const payload: Record<string, string | number | boolean> = {
-      vmid,
+    const vm = await novaAgentRequest('/v1/instances', 'POST', {
       name,
-      cores,
-      memory: memoryMb,
-      ostype: osType,
-      scsihw: 'virtio-scsi-single',
-      scsi0: `${storage}:${diskGb},iothread=1`,
-      net0: `virtio,bridge=${bridge}`,
-      boot: iso ? 'order=ide2;scsi0' : 'order=scsi0',
-      agent: 1,
-      onboot: 1,
-    };
-    if (iso) payload.ide2 = `${iso},media=cdrom`;
-    const task = await proxmoxRequest(
-      `/api2/json/nodes/${encodeURIComponent(node)}/qemu`,
-      'POST',
-      payload
-    );
+      vcpu: cores,
+      memoryMb,
+      diskGb,
+      bridge,
+      imageId: imageId || undefined,
+      start: true,
+    });
+    await finishJob(jobId, 'succeeded', vm);
+    await syncNovaAgentInventory();
     await pool.query(
-      `INSERT INTO activity_events (actor, action, resource, status) VALUES ($1, 'compute.create', $2, 'Submitted')`,
-      [String((req as any).session?.userId || 'user'), `qemu:${vmid}`],
-    ).catch(() => undefined);
-    lastProxmoxSyncAt = 0;
-    res.status(202).json({ success: true, task, vmid, name, node });
+      `INSERT INTO activity_events (actor, action, resource, status)
+       VALUES ($1, 'compute.create', $2, 'SUCCESS')`,
+      [String(req.session.userId || 'user'), vm.id],
+    );
+    res.status(201).json({ success: true, jobId, ...vm });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'VM creation failed' });
+    const message = error instanceof Error ? error.message : 'VM creation failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
   }
 });
 
 app.get('/api/compute/images', requireAuth, async (_req, res) => {
-  if (!proxmoxConfigured()) return res.json([]);
   try {
-    const nodes = await proxmoxGet('/api2/json/nodes');
-    const images: any[] = [];
-    for (const node of Array.isArray(nodes) ? nodes : []) {
-      const nodeName = String(node.node || '');
-      if (!nodeName) continue;
-      const storages = await proxmoxGet(`/api2/json/nodes/${encodeURIComponent(nodeName)}/storage`);
-      for (const storage of Array.isArray(storages) ? storages : []) {
-        const storageName = String(storage.storage || '');
-        const contentTypes = String(storage.content || '');
-        if (!storageName || (!contentTypes.includes('iso') && !contentTypes.includes('vztmpl'))) continue;
-        const content = await proxmoxGet(
-          `/api2/json/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(storageName)}/content`
-        );
-        for (const item of Array.isArray(content) ? content : []) {
-          if (!['iso', 'vztmpl'].includes(String(item.content || ''))) continue;
-          const volid = String(item.volid || '');
-          const filename = volid.split('/').pop() || volid;
-          images.push({
-            id: volid,
-            name: filename,
-            distribution: item.content === 'vztmpl' ? 'LXC Template' : 'ISO Image',
-            version: '—',
-            arch: 'x86_64',
-            size: `${(Number(item.size || 0) / 1024 ** 3).toFixed(2)} GB`,
-            type: item.content === 'vztmpl' ? 'Public Golden' : 'Custom AMI',
-            status: 'Ready',
-            node: nodeName,
-            storage: storageName,
-            content: item.content,
-          });
-        }
-      }
-    }
-    res.json(images);
+    const images = await novaAgentRequest('/v1/images');
+    res.json((Array.isArray(images) ? images : []).map((image: any) => ({
+      id: image.id,
+      name: image.name,
+      distribution: image.format === 'iso' ? 'ISO Image' : 'Disk Image',
+      version: '—',
+      arch: 'x86_64',
+      size: `${(Number(image.sizeBytes || 0) / 1024 ** 3).toFixed(2)} GB`,
+      type: 'Custom AMI',
+      status: 'Ready',
+    })));
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read Proxmox image inventory' });
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read Nova images' });
   }
 });
 
 app.post('/api/compute/images/import-url', requireAuth, async (req, res) => {
-  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
   const url = String(req.body?.url || '').trim();
   const filename = String(req.body?.filename || '').trim();
-  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'A valid HTTP or HTTPS image URL is required' });
-  if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename)) return res.status(400).json({ error: 'A safe filename is required' });
+  const jobId = await createJob('image.import', req.session.userId, 'image', filename || null, { url, filename });
   try {
-    const nodes = await proxmoxGet('/api2/json/nodes');
-    for (const node of Array.isArray(nodes) ? nodes : []) {
-      const nodeName = String(node.node || '');
-      if (!nodeName) continue;
-      const storages = await proxmoxGet(`/api2/json/nodes/${encodeURIComponent(nodeName)}/storage`);
-      const target = (Array.isArray(storages) ? storages : []).find((item: any) =>
-        String(item.content || '').includes('iso') && Number(item.active ?? 1) === 1
-      );
-      if (!target) continue;
-      const task = await proxmoxRequest(
-        `/api2/json/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(String(target.storage))}/download-url`,
-        'POST',
-        { url, filename, 'content': 'iso' }
-      );
-      return res.status(202).json({ success: true, task, node: nodeName, storage: target.storage, filename });
-    }
-    res.status(400).json({ error: 'No active Proxmox storage accepting ISO content was found' });
+    const image = await novaAgentRequest('/v1/images/import-url', 'POST', { url, filename });
+    await finishJob(jobId, 'succeeded', image);
+    await syncNovaAgentInventory();
+    res.status(201).json({ success: true, jobId, ...image });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Proxmox image import failed' });
+    const message = error instanceof Error ? error.message : 'Image import failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
   }
 });
 
 app.get('/api/compute/snapshots', requireAuth, async (_req, res) => {
-  if (!proxmoxConfigured()) return res.json([]);
   try {
-    const inventory = await pool.query(
-      `SELECT external_id, data FROM resources WHERE provider = 'proxmox' AND type = 'vm' ORDER BY updated_at DESC`
-    );
-    const snapshots: any[] = [];
-    for (const row of inventory.rows) {
-      const data = row.data || {};
-      const node = String(data.tags?.node || '');
-      const kind = String(data.tags?.kind || 'qemu');
-      const vmid = String(data.tags?.vmid || '');
-      if (!node || !vmid || !['qemu', 'lxc'].includes(kind)) continue;
+    const instances = await novaAgentRequest('/v1/instances');
+    const all: any[] = [];
+    for (const vm of Array.isArray(instances) ? instances : []) {
       try {
-        const items = await proxmoxGet(
-          `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/snapshot`
-        );
-        for (const snap of Array.isArray(items) ? items : []) {
-          if (snap.name === 'current') continue;
-          snapshots.push({
-            id: `${kind}:${vmid}:${snap.name}`,
-            name: snap.name,
-            sourceVm: data.name || vmid,
-            sizeGb: Number((Number(data.storageGb || 0)).toFixed(2)),
-            created: snap.snaptime ? new Date(Number(snap.snaptime) * 1000).toISOString() : '—',
-            encryption: 'Provider managed',
-            status: 'Available',
-          });
-        }
+        const snapshots = await novaAgentRequest(`/v1/instances/${encodeURIComponent(vm.id)}/snapshots`);
+        all.push(...(Array.isArray(snapshots) ? snapshots : []));
       } catch {}
     }
-    res.json(snapshots);
+    res.json(all);
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read snapshots' });
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to list snapshots' });
   }
 });
 
 app.post('/api/compute/vms/:id/snapshots', requireAuth, async (req, res) => {
-  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
   const id = String(req.params.id || '');
-  const snapname = String(req.body?.name || '').trim();
-  if (!/^[A-Za-z0-9_-]{1,40}$/.test(snapname)) return res.status(400).json({ error: 'Snapshot name may contain only letters, numbers, underscores, and hyphens' });
-  const row = await pool.query(`SELECT data FROM resources WHERE type = 'vm' AND data->>'id' = $1 LIMIT 1`, [id]);
-  if (!row.rows[0]) return res.status(404).json({ error: 'VM was not found in the synchronized inventory' });
-  const data = row.rows[0].data || {};
-  const node = String(data.tags?.node || '');
-  const kind = String(data.tags?.kind || 'qemu');
-  const vmid = String(data.tags?.vmid || '');
-  if (!node || !vmid || !['qemu', 'lxc'].includes(kind)) return res.status(400).json({ error: 'VM is missing Proxmox provider metadata' });
+  const name = String(req.body?.name || '').trim();
+  const jobId = await createJob('snapshot.create', req.session.userId, 'vm', id, { name });
   try {
-    const task = await proxmoxRequest(
-      `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/snapshot`,
-      'POST',
-      { snapname }
-    );
-    res.status(202).json({ success: true, task });
+    const result = await novaAgentRequest(`/v1/instances/${encodeURIComponent(id)}/snapshots`, 'POST', { name });
+    await finishJob(jobId, 'succeeded', result);
+    res.status(201).json({ success: true, jobId, ...result });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Snapshot creation failed' });
-  }
-});
-
-app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
-  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
-  const id = String(req.params.id || '');
-  const action = String(req.body?.action || '');
-  if (!['start', 'stop', 'shutdown', 'reboot', 'delete'].includes(action)) return res.status(400).json({ error: 'Unsupported VM action' });
-  const row = await pool.query(`SELECT data FROM resources WHERE type = 'vm' AND data->>'id' = $1 LIMIT 1`, [id]);
-  if (!row.rows[0]) return res.status(404).json({ error: 'VM was not found in the synchronized inventory' });
-  const data = row.rows[0].data || {};
-  const node = String(data.tags?.node || '');
-  const kind = String(data.tags?.kind || 'qemu');
-  const vmid = String(data.tags?.vmid || '');
-  if (!node || !vmid || !['qemu', 'lxc'].includes(kind)) return res.status(400).json({ error: 'VM is missing Proxmox provider metadata' });
-  try {
-    let task;
-    if (action === 'delete') {
-      task = await proxmoxRequest(
-        `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}`,
-        'DELETE'
-      );
-    } else {
-      task = await proxmoxRequest(
-        `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/status/${action}`,
-        'POST'
-      );
-    }
-    await pool.query(
-      `INSERT INTO activity_events (actor, action, resource, status) VALUES ($1, $2, $3, 'Submitted')`,
-      [String((req as any).session?.userId || 'user'), `compute.${action}`, id],
-    ).catch(() => undefined);
-    if (action === 'delete') {
-      await pool.query(`DELETE FROM resources WHERE type = 'vm' AND data->>'id' = $1`, [id]);
-    }
-    res.status(202).json({ success: true, task, action });
-  } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : `VM ${action} failed` });
+    const message = error instanceof Error ? error.message : 'Snapshot creation failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
   }
 });
 
 app.post('/api/compute/snapshots/rollback', requireAuth, async (req, res) => {
-  if (!proxmoxConfigured()) return res.status(400).json({ error: 'Proxmox provider is not configured' });
-  const snapshotId = String(req.body?.id || '');
-  const parts = snapshotId.split(':');
-  if (parts.length < 3) return res.status(400).json({ error: 'Invalid snapshot identifier' });
-  const kind = parts[0];
-  const vmid = parts[1];
-  const snapname = parts.slice(2).join(':');
-  if (!['qemu', 'lxc'].includes(kind) || !/^\d+$/.test(vmid)) return res.status(400).json({ error: 'Invalid snapshot identifier' });
-  const row = await pool.query(
-    `SELECT data FROM resources WHERE provider = 'proxmox' AND type = 'vm' AND data->'tags'->>'vmid' = $1 AND data->'tags'->>'kind' = $2 LIMIT 1`,
-    [vmid, kind],
-  );
-  if (!row.rows[0]) return res.status(404).json({ error: 'Snapshot source VM was not found' });
-  const node = String(row.rows[0].data?.tags?.node || '');
+  const full = String(req.body?.id || '');
+  const split = full.indexOf(':');
+  if (split < 1) return res.status(400).json({ error: 'Invalid snapshot identifier' });
+  const id = full.slice(0, split);
+  const name = full.slice(split + 1);
+  const jobId = await createJob('snapshot.rollback', req.session.userId, 'vm', id, { name });
   try {
-    const task = await proxmoxRequest(
-      `/api2/json/nodes/${encodeURIComponent(node)}/${kind}/${encodeURIComponent(vmid)}/snapshot/${encodeURIComponent(snapname)}/rollback`,
-      'POST'
+    const result = await novaAgentRequest(
+      `/v1/instances/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(name)}/rollback`,
+      'POST',
     );
-    res.status(202).json({ success: true, task });
+    await finishJob(jobId, 'succeeded', result);
+    res.json({ success: true, jobId, ...result });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : 'Snapshot rollback failed' });
+    const message = error instanceof Error ? error.message : 'Snapshot rollback failed';
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
+  }
+});
+
+app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const action = String(req.body?.action || '');
+  if (!['start', 'stop', 'shutdown', 'reboot', 'delete'].includes(action)) return res.status(400).json({ error: 'Unsupported VM action' });
+  const jobId = await createJob(`compute.${action}`, req.session.userId, 'vm', id, { action });
+  try {
+    let result: any = {};
+    if (action === 'delete') {
+      await novaAgentRequest(`/v1/instances/${encodeURIComponent(id)}`, 'DELETE');
+    } else {
+      result = await novaAgentRequest(`/v1/instances/${encodeURIComponent(id)}/action`, 'POST', { action });
+    }
+    await finishJob(jobId, 'succeeded', result);
+    await syncNovaAgentInventory();
+    await pool.query(
+      `INSERT INTO activity_events (actor, action, resource, status)
+       VALUES ($1, $2, $3, 'SUCCESS')`,
+      [String(req.session.userId || 'user'), `compute.${action}`, id],
+    );
+    res.json({ success: true, jobId, result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : `VM ${action} failed`;
+    await finishJob(jobId, 'failed', {}, message);
+    res.status(502).json({ error: message, jobId });
   }
 });
 
@@ -655,7 +474,7 @@ app.get('/api/system/summary', requireAuth, async (_req, res) => {
 });
 
 app.get('/api/dashboard', requireAuth, async (_req, res) => {
-  try { await syncProxmoxInventory(); } catch (error) { console.error('Proxmox sync failed', error); }
+  try { await syncNovaAgentInventory(); } catch (error) { console.error('Nova Agent sync failed', error); }
   const [resources, activity] = await Promise.all([
     pool.query('SELECT id, type, data FROM resources ORDER BY updated_at DESC'),
     pool.query(`SELECT id, action, resource, status, actor AS "user", source_ip AS ip,
