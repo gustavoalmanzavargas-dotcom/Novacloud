@@ -47,6 +47,7 @@ interface LauncherItem {
   icon: React.ComponentType<{ className?: string }>;
   view: ActiveView;
   badge?: string;
+  available?: boolean;
 }
 
 export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
@@ -79,6 +80,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       description: 'Run microservices and Docker workloads without managing underlying VM infrastructure.',
       icon: Boxes,
       view: 'applications',
+      available: false,
     },
     {
       id: 'res-k8s',
@@ -88,6 +90,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       icon: Layers,
       view: 'applications',
       badge: 'Enterprise',
+      available: false,
     },
     {
       id: 'res-app',
@@ -114,6 +117,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       description: 'Ultra-low latency in-memory data store for caching, session stores, and pub/sub queues.',
       icon: Database,
       view: 'databases',
+      available: false,
     },
     {
       id: 'res-storage-obj',
@@ -122,6 +126,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       description: 'S3-compatible scalable cloud storage for assets, backups, logs, and unstructured data.',
       icon: HardDrive,
       view: 'storage',
+      available: false,
     },
     {
       id: 'res-storage-blk',
@@ -146,6 +151,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       description: 'High-availability L7 load balancer with automated SSL and health check probing.',
       icon: Globe,
       view: 'networking',
+      available: false,
     },
     {
       id: 'res-vpn',
@@ -154,6 +160,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       description: 'Secure IPsec tunnel connecting your on-premise datacenter to your Cyverax VPC.',
       icon: Lock,
       view: 'networking',
+      available: false,
     },
     {
       id: 'res-ai',
@@ -179,6 +186,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
       description: 'Deploy pre-packaged open source & commercial software stacks in minutes.',
       icon: ShoppingBag,
       view: 'marketplace',
+      available: false,
     },
   ];
 
@@ -205,6 +213,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
   });
 
   const handleSelect = (item: LauncherItem) => {
+    if (item.available === false) return;
     onClose();
     if (item.id === 'res-app' && onLaunchDeploymentWorkflow) {
       onLaunchDeploymentWorkflow();
@@ -298,7 +307,8 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
               <div
                 key={item.id}
                 onClick={() => handleSelect(item)}
-                className={`group p-3.5 rounded-lg border transition-all cursor-pointer flex flex-col justify-between ${
+                aria-disabled={item.available === false}
+                className={`group p-3.5 rounded-lg border transition-all flex flex-col justify-between ${item.available === false ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'} ${
                   isLight
                     ? 'border-slate-200 hover:border-cyan-500 bg-white hover:bg-cyan-50/20 shadow-xs'
                     : 'border-slate-800 hover:border-cyan-500/50 bg-slate-950/40 hover:bg-slate-800/40'
@@ -357,8 +367,8 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
                       : 'border-slate-800/60 text-cyan-400'
                   }`}
                 >
-                  <span>Configure & Launch</span>
-                  <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
+                  <span>{item.available === false ? 'Engine not enabled yet' : 'Configure & Launch'}</span>
+                  {item.available !== false && <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />}
                 </div>
               </div>
             );
@@ -376,7 +386,7 @@ export const CreateResourceModal: React.FC<CreateResourceModalProps> = ({
           <div className="flex items-center gap-2">
             <span>Target Region:</span>
             <span className={`font-semibold font-mono ${isLight ? 'text-slate-900' : 'text-slate-200'}`}>
-              US East — Atlanta (us-atl-1)
+              Local Nova Environment
             </span>
           </div>
           <button
