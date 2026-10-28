@@ -186,7 +186,7 @@ function ensureNatRule(cidr: string) {
   const comment = `nova:${cidr}`;
   const rules = run('nft', ['list', 'chain', 'ip', 'nova_nat', 'postrouting']);
   if (!rules.includes(`"${comment}"`)) {
-    run('nft', ['add', 'rule', 'ip', 'nova_nat', 'postrouting', 'ip', 'saddr', cidr, 'oifname', uplink, 'masquerade', 'comment', comment]);
+    run('nft', ['add', 'rule', 'ip', 'nova_nat', 'postrouting', 'ip', 'saddr', cidr, 'oifname', uplink, 'masquerade', 'comment', JSON.stringify(comment)]);
   }
 }
 
