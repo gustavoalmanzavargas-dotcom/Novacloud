@@ -26,7 +26,7 @@ import {
   Share2,
   Server,
 } from 'lucide-react';
-import { ActiveView } from '../types';
+import type { ActiveView } from '../types';
 
 interface LeftSidebarProps {
   activeView: ActiveView;
@@ -50,8 +50,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   collapsed,
   setIsCollapsed,
   onToggleCollapse,
-  alertsCount = 2,
-  appsDegraded = true,
+  alertsCount = 0,
+  appsDegraded = false,
   themeMode = 'dark',
 }) => {
   // Accordion expansion states
@@ -188,7 +188,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               }`}
             >
               <span>Master Controller</span>
-              <span className="text-[9px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 rounded font-semibold border border-cyan-500/40">ROOT</span>
+              <span className="text-[9px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 rounded font-semibold border border-cyan-500/40">NOVA</span>
             </div>
           )}
 
@@ -206,7 +206,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
             </div>
             {!collapsedState && (
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-bold">
-                VLANs
+                Workloads
               </span>
             )}
           </button>
@@ -275,7 +275,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                       (!activeSubTab || activeSubTab === 'vms')
                   )}`}
                 >
-                  Virtual Machines (8)
+                  Virtual Machines
                 </button>
                 <button
                   id="nav-sub-images-btn"
@@ -378,7 +378,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                       (!activeSubTab || activeSubTab === 'workloads')
                   )}`}
                 >
-                  Deployed Workloads (4)
+                  Deployed Workloads
                 </button>
                 <button
                   id="nav-sub-deploy-app-btn"
@@ -469,7 +469,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'networking' && activeSubTab === 'subnets'
                   )}`}
                 >
-                  Subnets & CIDRs (3)
+                  Subnets & CIDRs
                 </button>
                 <button
                   id="nav-sub-net-alb-btn"
@@ -487,7 +487,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'networking' && activeSubTab === 'firewalls'
                   )}`}
                 >
-                  Firewall Rules (14)
+                  Firewall Rules
                 </button>
                 <button
                   id="nav-sub-net-routing-btn"
@@ -608,9 +608,6 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               </div>
               {!collapsedState && (
                 <div className="flex items-center gap-1.5">
-                  <span className={`text-[10px] font-mono ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
-                    3
-                  </span>
                   {databasesOpen ? (
                     <ChevronDown className="w-3 h-3 text-slate-400" />
                   ) : (
@@ -633,7 +630,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'databases' && (!activeSubTab || activeSubTab === 'clusters')
                   )}`}
                 >
-                  Managed Clusters (3)
+                  PostgreSQL Databases
                 </button>
                 <button
                   id="nav-sub-db-console-btn"
@@ -651,7 +648,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'databases' && activeSubTab === 'backups'
                   )}`}
                 >
-                  Automated Backups & PITR
+                  Database Backups
                 </button>
               </div>
             )}
@@ -684,7 +681,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                         : 'bg-purple-500/30 text-purple-200'
                     }`}
                   >
-                    AUTONOMOUS
+                    ADVICE
                   </span>
                 </div>
               )}
@@ -764,7 +761,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'security' && activeSubTab === 'vulnerabilities'
                   )}`}
                 >
-                  Vulnerability Alerts (3)
+                  Vulnerability Alerts
                 </button>
                 <button
                   id="nav-sub-sec-compliance-btn"
@@ -825,7 +822,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'iam' && (!activeSubTab || activeSubTab === 'users')
                   )}`}
                 >
-                  Team Members (4)
+                  Team Members
                 </button>
                 <button
                   id="nav-sub-iam-keys-btn"
@@ -834,7 +831,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'iam' && activeSubTab === 'keys'
                   )}`}
                 >
-                  API Access Keys (3)
+                  API Access Keys
                 </button>
                 <button
                   id="nav-sub-iam-roles-btn"
@@ -904,7 +901,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'monitoring' && activeSubTab === 'alerts'
                   )}`}
                 >
-                  Alert Thresholds (3)
+                  Alert Thresholds
                 </button>
                 <button
                   id="nav-sub-mon-slo-btn"
@@ -913,7 +910,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     activeView === 'monitoring' && activeSubTab === 'slos'
                   )}`}
                 >
-                  SLOs & Uptime (99.99%)
+                  SLOs & Uptime
                 </button>
               </div>
             )}

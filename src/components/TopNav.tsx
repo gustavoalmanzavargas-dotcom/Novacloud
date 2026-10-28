@@ -19,17 +19,13 @@ import {
   Building2,
   Key,
 } from 'lucide-react';
-import { Environment, Region, NotificationItem } from '../types';
+import type { NotificationItem } from '../types';
 
 interface TopNavProps {
-  environment?: Environment | string;
-  activeEnvironment?: string;
-  setEnvironment?: (env: any) => void;
-  onSelectEnvironment?: (env: string) => void;
-  region?: Region | string;
-  activeRegion?: string;
-  setRegion?: (reg: any) => void;
-  onSelectRegion?: (reg: string) => void;
+  organization?: string;
+  hostName?: string;
+  user?: { displayName: string; role: string; email: string };
+  onSignOut?: () => void;
   onOpenCommandPalette: () => void;
   onToggleTerminal?: () => void;
   onToggleCloudShell?: () => void;
@@ -38,21 +34,12 @@ interface TopNavProps {
   notifications?: NotificationItem[];
   unreadNotifications?: number;
   themeMode: 'dark' | 'light';
-  setThemeMode?: (mode: 'dark' | 'light') => void;
-  onToggleTheme?: () => void;
   onNavigate?: (view: any) => void;
   onOpenCreateResource?: () => void;
 }
 
 export const TopNav: React.FC<TopNavProps> = ({
-  environment,
-  activeEnvironment,
-  setEnvironment,
-  onSelectEnvironment,
-  region,
-  activeRegion,
-  setRegion,
-  onSelectRegion,
+  organization, hostName, user, onSignOut,
   onOpenCommandPalette,
   onToggleTerminal,
   onToggleCloudShell,
@@ -61,38 +48,14 @@ export const TopNav: React.FC<TopNavProps> = ({
   notifications = [],
   unreadNotifications,
   themeMode,
-  setThemeMode,
-  onToggleTheme,
   onNavigate,
   onOpenCreateResource,
 }) => {
-  const [isEnvMenuOpen, setIsEnvMenuOpen] = useState(false);
-  const [isRegionMenuOpen, setIsRegionMenuOpen] = useState(false);
-  const [isOrgMenuOpen, setIsOrgMenuOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
-  const [currentOrg, setCurrentOrg] = useState({
-    name: 'Cyverax Enterprise',
-    id: 'org-9842',
-    fullName: 'Cyverax Enterprise Corp',
-    tag: 'org-9842-prd',
-  });
 
   const isLight = themeMode === 'light';
 
-  const currentEnv = (activeEnvironment || environment || 'Production') as Environment;
-  const handleSetEnv = (env: Environment) => {
-    onSelectEnvironment?.(env);
-    setEnvironment?.(env);
-  };
-
-  const currentRegion = (activeRegion || region || 'US East — Atlanta') as Region;
-  const handleSetRegion = (reg: Region) => {
-    onSelectRegion?.(reg);
-    setRegion?.(reg);
-  };
-
   const handleToggleTerminal = onToggleCloudShell || onToggleTerminal || (() => {});
-  const handleToggleTheme = onToggleTheme || (() => setThemeMode?.(themeMode === 'dark' ? 'light' : 'dark'));
   const safeNavigate = onNavigate || (() => {});
 
   const unreadCount =
@@ -155,223 +118,13 @@ export const TopNav: React.FC<TopNavProps> = ({
           </button>
         )}
 
-        {/* Organization Selector */}
-        <div className="relative hidden lg:block">
-          <button
-            id="org-selector-btn"
-            onClick={() => setIsOrgMenuOpen(!isOrgMenuOpen)}
-            className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded border transition-colors cursor-pointer ${
-              isLight
-                ? 'text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border-slate-200'
-                : 'text-slate-300 hover:text-white bg-transparent hover:bg-slate-900 border-slate-800'
-            }`}
-          >
-            <Building2 className="w-3.5 h-3.5 text-cyan-500" />
-            <span className="max-w-[130px] truncate">{currentOrg.name}</span>
-            <span className={`text-[10px] font-mono ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
-              ({currentOrg.id})
-            </span>
-            <ChevronDown className="w-3 h-3 text-slate-400" />
-          </button>
-
-          {isOrgMenuOpen && (
-            <div
-              className={`absolute left-0 mt-1.5 w-64 rounded-md shadow-xl py-1 z-50 text-xs border ${
-                isLight ? 'bg-white border-slate-200 text-slate-800' : 'bg-slate-900 border-slate-800 text-slate-200'
-              }`}
-              onMouseLeave={() => setIsOrgMenuOpen(false)}
-            >
-              <div
-                className={`px-3 py-1.5 border-b text-[11px] font-semibold uppercase tracking-wider ${
-                  isLight ? 'border-slate-100 text-slate-400' : 'border-slate-800 text-slate-500'
-                }`}
-              >
-                Select Organization
-              </div>
-              <button
-                className={`w-full text-left px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${
-                  currentOrg.id === 'org-9842'
-                    ? isLight
-                      ? 'bg-cyan-50 text-cyan-900'
-                      : 'bg-cyan-500/10 text-white'
-                    : isLight
-                    ? 'hover:bg-slate-50 text-slate-700'
-                    : 'hover:bg-slate-800 text-slate-300'
-                }`}
-                onClick={() => {
-                  setCurrentOrg({
-                    name: 'Cyverax Enterprise',
-                    id: 'org-9842',
-                    fullName: 'Cyverax Enterprise Corp',
-                    tag: 'org-9842-prd',
-                  });
-                  setIsOrgMenuOpen(false);
-                }}
-              >
-                <div>
-                  <div className="font-semibold">Cyverax Enterprise Corp</div>
-                  <div className={`text-[10px] font-mono ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
-                    ID: org-9842-prd
-                  </div>
-                </div>
-                {currentOrg.id === 'org-9842' && <CheckCircle2 className="w-3.5 h-3.5 text-cyan-500" />}
-              </button>
-              <button
-                className={`w-full text-left px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${
-                  currentOrg.id === 'org-1140'
-                    ? isLight
-                      ? 'bg-cyan-50 text-cyan-900'
-                      : 'bg-cyan-500/10 text-white'
-                    : isLight
-                    ? 'hover:bg-slate-50 text-slate-700'
-                    : 'hover:bg-slate-800 text-slate-300'
-                }`}
-                onClick={() => {
-                  setCurrentOrg({
-                    name: 'Cyverax Labs Staging',
-                    id: 'org-1140',
-                    fullName: 'Cyverax Labs Staging Tenant',
-                    tag: 'org-1140-stg',
-                  });
-                  setIsOrgMenuOpen(false);
-                }}
-              >
-                <div>
-                  <div className="font-semibold">Cyverax Labs Staging</div>
-                  <div className={`text-[10px] font-mono ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
-                    ID: org-1140-stg
-                  </div>
-                </div>
-                {currentOrg.id === 'org-1140' && <CheckCircle2 className="w-3.5 h-3.5 text-cyan-500" />}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Environment Selector */}
-        <div className="relative">
-          <button
-            id="env-selector-btn"
-            onClick={() => setIsEnvMenuOpen(!isEnvMenuOpen)}
-            className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded border transition-colors cursor-pointer ${
-              isLight
-                ? 'text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border-slate-200'
-                : 'text-slate-200 hover:text-white bg-transparent hover:bg-slate-900 border-slate-800'
-            }`}
-          >
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                currentEnv === 'Production'
-                  ? 'bg-emerald-500 ring-2 ring-emerald-500/20'
-                  : currentEnv === 'Development'
-                  ? 'bg-amber-500'
-                  : 'bg-indigo-500'
-              }`}
-            />
-            <span>{currentEnv}</span>
-            <ChevronDown className="w-3 h-3 text-slate-400" />
-          </button>
-
-          {isEnvMenuOpen && (
-            <div
-              className={`absolute left-0 mt-1.5 w-40 rounded-md shadow-xl py-1 z-50 text-xs border ${
-                isLight ? 'bg-white border-slate-200 text-slate-800' : 'bg-slate-900 border-slate-800 text-slate-200'
-              }`}
-              onMouseLeave={() => setIsEnvMenuOpen(false)}
-            >
-              {(['Production', 'Development', 'Testing'] as Environment[]).map((env) => (
-                <button
-                  key={env}
-                  onClick={() => {
-                    handleSetEnv(env);
-                    setIsEnvMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-1.5 flex items-center gap-2 cursor-pointer transition-colors ${
-                    isLight ? 'hover:bg-slate-50' : 'hover:bg-slate-800'
-                  } ${
-                    currentEnv === env
-                      ? isLight
-                        ? 'text-cyan-700 font-semibold bg-cyan-50/70'
-                        : 'text-cyan-400 font-semibold bg-slate-800/50'
-                      : isLight
-                      ? 'text-slate-700'
-                      : 'text-slate-300'
-                  }`}
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      env === 'Production'
-                        ? 'bg-emerald-500'
-                        : env === 'Development'
-                        ? 'bg-amber-500'
-                        : 'bg-indigo-500'
-                    }`}
-                  />
-                  {env}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Region Selector */}
-        <div className="relative hidden sm:block">
-          <button
-            id="region-selector-btn"
-            onClick={() => setIsRegionMenuOpen(!isRegionMenuOpen)}
-            className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded border transition-colors cursor-pointer ${
-              isLight
-                ? 'text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border-slate-200'
-                : 'text-slate-300 hover:text-white bg-transparent hover:bg-slate-900 border-slate-800'
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5 text-slate-400" />
-            <span className="max-w-[130px] truncate">{currentRegion}</span>
-            <ChevronDown className="w-3 h-3 text-slate-400" />
-          </button>
-
-          {isRegionMenuOpen && (
-            <div
-              className={`absolute left-0 mt-1.5 w-56 rounded-md shadow-xl py-1 z-50 text-xs border ${
-                isLight ? 'bg-white border-slate-200 text-slate-800' : 'bg-slate-900 border-slate-800 text-slate-200'
-              }`}
-              onMouseLeave={() => setIsRegionMenuOpen(false)}
-            >
-              {(
-                [
-                  'US East — Atlanta',
-                  'US West — Oregon',
-                  'EU Central — Frankfurt',
-                  'AP South — Tokyo',
-                ] as Region[]
-              ).map((reg) => (
-                <button
-                  key={reg}
-                  onClick={() => {
-                    handleSetRegion(reg);
-                    setIsRegionMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${
-                    isLight ? 'hover:bg-slate-50' : 'hover:bg-slate-800'
-                  } ${
-                    currentRegion === reg
-                      ? isLight
-                        ? 'text-cyan-700 font-semibold bg-cyan-50/70'
-                        : 'text-cyan-400 font-semibold bg-slate-800/50'
-                      : isLight
-                      ? 'text-slate-700'
-                      : 'text-slate-300'
-                  }`}
-                >
-                  <span>{reg}</span>
-                  {currentRegion === reg && (
-                    <span className="text-[10px] font-mono font-bold text-cyan-600">ACTIVE</span>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <button onClick={() => safeNavigate('settings')} className={`hidden lg:flex items-center gap-1.5 px-2 py-1 text-xs rounded border ${isLight ? 'border-slate-200 text-slate-700' : 'border-slate-800 text-slate-300'}`} title="Organization profile">
+          <Building2 className="w-3.5 h-3.5 text-cyan-500" />
+          <span className="max-w-[150px] truncate">{organization || 'NovaCloud'}</span>
+        </button>
+        <span className={`hidden xl:flex items-center gap-1.5 text-[11px] ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+          <Globe className="w-3.5 h-3.5" />{hostName || 'Agent unavailable'}
+        </span>
       </div>
 
       {/* Middle: Global Omnisearch Bar */}
@@ -486,10 +239,10 @@ export const TopNav: React.FC<TopNavProps> = ({
             }`}
           >
             <div className="w-6 h-6 rounded bg-gradient-to-tr from-cyan-600 to-indigo-600 flex items-center justify-center text-white font-bold text-[11px] ring-1 ring-cyan-500/30">
-              GA
+              {user?.displayName?.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase()}
             </div>
             <span className="hidden xl:inline max-w-[120px] truncate text-[11px] font-medium">
-              Nova Administrator
+              {user?.displayName}
             </span>
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
@@ -503,13 +256,13 @@ export const TopNav: React.FC<TopNavProps> = ({
             >
               <div className={`px-3 py-2 border-b ${isLight ? 'border-slate-100' : 'border-slate-800'}`}>
                 <div className={`font-semibold ${isLight ? 'text-slate-900' : 'text-white'}`}>
-                  Gustavo Almanza Vargas
+                  {user?.displayName}
                 </div>
                 <div className={`text-[11px] font-mono truncate ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                  Signed-in administrator
+                  {user?.email}
                 </div>
                 <div className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-600 font-medium text-[10px]">
-                  <Shield className="w-3 h-3" /> Organization Admin
+                  <Shield className="w-3 h-3" /> {user?.role}
                 </div>
               </div>
 
@@ -566,7 +319,7 @@ export const TopNav: React.FC<TopNavProps> = ({
 
               <div className={`border-t pt-1 ${isLight ? 'border-slate-100' : 'border-slate-800'}`}>
                 <button
-                  onClick={() => setIsUserMenuOpen(false)}
+                  onClick={onSignOut}
                   className="w-full text-left px-3 py-1.5 text-red-500 hover:bg-red-500/10 flex items-center gap-2 cursor-pointer transition-colors"
                 >
                   <LogOut className="w-3.5 h-3.5" />

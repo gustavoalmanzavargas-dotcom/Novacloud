@@ -88,7 +88,7 @@ fi
 
 echo "Installing system packages..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg nginx openssl postgresql postgresql-contrib rsync
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg nginx novnc openssl postgresql postgresql-contrib rsync
 DB_PASSWORD="$(openssl rand -hex 24)"
 SESSION_SECRET="$(openssl rand -hex 48)"
 
@@ -149,6 +149,7 @@ Wants=network-online.target
 Type=simple
 User=novacloud
 Group=novacloud
+SupplementaryGroups=systemd-journal
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
 Environment=NODE_ENV=production
@@ -170,11 +171,17 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${APP_HOST};
-    client_max_body_size 10m;
+    client_max_body_size 0;
+    proxy_read_timeout 900s;
+    proxy_send_timeout 900s;
+    proxy_request_buffering off;
+    proxy_buffering off;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;

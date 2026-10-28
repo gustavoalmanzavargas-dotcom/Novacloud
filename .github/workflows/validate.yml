@@ -7,14 +7,35 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: nova-ci-only
+          POSTGRES_DB: nova_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:nova-ci-only@127.0.0.1:5432/nova_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      - run: sudo apt-get update && sudo apt-get install -y qemu-utils postgresql-client-16
+      - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - run: echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - run: bash -n scripts/update.sh
       - run: bash -n install.sh
       - run: bash -n scripts/install-nova-agent.sh
       - run: bash -n scripts/enable-single-node.sh

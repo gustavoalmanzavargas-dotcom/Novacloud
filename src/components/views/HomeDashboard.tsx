@@ -19,6 +19,7 @@ interface HomeDashboardProps {
   storage?: StorageItem[];
   activities?: ActivityEvent[];
   themeMode: 'dark' | 'light';
+  agentState: { connected: boolean; host?: any; error?: string };
 }
 
 export const HomeDashboard: React.FC<HomeDashboardProps> = ({
@@ -31,33 +32,9 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   storage = [],
   activities = [],
   themeMode,
+  agentState,
 }) => {
   const isLight = themeMode === 'light';
-  const [agentState, setAgentState] = React.useState<{ connected: boolean; host?: any; error?: string }>({ connected: false });
-
-  React.useEffect(() => {
-    let active = true;
-    const loadHost = async () => {
-      try {
-        const response = await fetch('/api/nova/host');
-        const body = await response.json().catch(() => ({}));
-        if (!active) return;
-        setAgentState({
-          connected: response.ok && body?.connected === true,
-          host: body?.host,
-          error: response.ok ? undefined : body?.error,
-        });
-      } catch (error) {
-        if (active) setAgentState({ connected: false, error: error instanceof Error ? error.message : 'Nova Agent unavailable' });
-      }
-    };
-    loadHost();
-    const timer = window.setInterval(loadHost, 10000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, []);
   const panel = isLight
     ? 'bg-white border-slate-200 text-slate-900'
     : 'bg-slate-900 border-slate-800 text-white';
@@ -67,7 +44,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     { label: 'Virtual Machines', value: vms.length, icon: Server, view: 'compute' as ActiveView },
     { label: 'Applications', value: applications.length, icon: Boxes, view: 'applications' as ActiveView },
     { label: 'Databases', value: databases.length, icon: Database, view: 'databases' as ActiveView },
-    { label: 'Storage Used', value: storageUsed ? `${storageUsed.toFixed(1)} GB` : '0 GB', icon: HardDrive, view: 'storage' as ActiveView },
+    { label: 'Storage Used', value: storage.some(item => Number.isFinite(item.usedGb)) ? `${storageUsed.toFixed(1)} GB` : 'Not measured', icon: HardDrive, view: 'storage' as ActiveView },
   ];
 
   return (

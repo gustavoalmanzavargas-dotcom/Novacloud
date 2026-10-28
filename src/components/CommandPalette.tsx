@@ -79,10 +79,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     },
     {
       id: 'cmd-deploy-app',
-      title: 'Deploy Application (JobFinderAI / Web)',
+      title: 'Deploy Application',
       category: 'Actions',
       icon: AppWindow,
-      description: 'Launch guided 6-step container/repo deployment workflow',
+      description: 'Deploy a Git repository using Nova Agent',
       action: () => {
         onNavigate('applications');
         onClose();
@@ -94,7 +94,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       category: 'Tools',
       icon: Sparkles,
       shortcut: 'AI',
-      description: 'Ask Nova AI to formulate execution plans or diagnose cluster health',
+      description: 'Ask for advice; AI cannot execute infrastructure changes',
       action: () => {
         onNavigate('ai');
         onClose();
@@ -117,7 +117,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       title: 'Go to Compute',
       category: 'Navigation',
       icon: Cpu,
-      description: 'Manage 8 instances, images, snapshots, and SSH keys',
+      description: 'Manage your instances, images, snapshots, and SSH keys',
       action: () => {
         onNavigate('compute');
         onClose();
@@ -139,7 +139,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       title: 'Go to Security Center',
       category: 'Navigation',
       icon: Shield,
-      description: 'View Security Score (92), findings, and 1-click remediations',
+      description: 'Review account roles and infrastructure capabilities',
       action: () => {
         onNavigate('security');
         onClose();
@@ -150,7 +150,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       title: 'Go to Databases',
       category: 'Navigation',
       icon: Database,
-      description: 'PostgreSQL, Redis, MongoDB, and SQL Server instances',
+      description: 'Manage Nova PostgreSQL schemas, queries, and backups',
       action: () => {
         onNavigate('databases');
         onClose();
@@ -161,7 +161,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       title: 'Go to Storage',
       category: 'Navigation',
       icon: HardDrive,
-      description: 'Object buckets, NVMe block storage, NFS shares',
+      description: 'Manage Nova-owned virtual disk files and inspect detected hardware',
       action: () => {
         onNavigate('storage');
         onClose();
@@ -172,7 +172,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       title: 'Open Billing & Cost Management',
       category: 'Navigation',
       icon: CreditCard,
-      description: 'Current month ($1,842), forecasts, invoices, budgets',
+      description: 'Manage manual invoice records',
       action: () => {
         onNavigate('billing');
         onClose();

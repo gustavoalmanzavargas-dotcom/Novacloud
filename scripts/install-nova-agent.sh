@@ -10,22 +10,35 @@ source /etc/os-release
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="/opt/novacloud"
 STATE_DIR="/var/lib/novacloud-agent"
-BRIDGE="${NOVA_AGENT_BRIDGE:-novabr0}"
-BRIDGE_ADDR="${NOVA_AGENT_BRIDGE_ADDRESS:-10.88.0.1/24}"
-UPLINK="${NOVA_AGENT_UPLINK:-$(ip route | awk '/default/ {print $5; exit}')}"
-TOKEN="${NOVA_AGENT_TOKEN:-$(openssl rand -hex 32)}"
-AGENT_BIND="${NOVA_AGENT_BIND:-0.0.0.0}"
+read_existing() { sed -n "s/^$1=//p" /etc/novacloud-agent.env 2>/dev/null || true; }
+BRIDGE="${NOVA_AGENT_BRIDGE:-$(read_existing NOVA_AGENT_BRIDGE)}"
+BRIDGE="${BRIDGE:-novabr0}"
+CIDR="${NOVA_AGENT_CIDR:-$(read_existing NOVA_AGENT_CIDR)}"
+CIDR="${CIDR:-10.88.0.0/24}"
+# Keep the controller's existing credential valid when updating the agent.
+EXISTING_TOKEN="$(sed -n 's/^NOVA_AGENT_TOKEN=//p' /etc/novacloud-agent.env 2>/dev/null || true)"
+TOKEN="${NOVA_AGENT_TOKEN:-${EXISTING_TOKEN}}"
+AGENT_BIND="${NOVA_AGENT_BIND:-$(read_existing NOVA_AGENT_BIND)}"
+AGENT_BIND="${AGENT_BIND:-127.0.0.1}"
+DNS="${NOVA_AGENT_DNS:-$(read_existing NOVA_AGENT_DNS)}"
+DNS="${DNS:-1.1.1.1,8.8.8.8}"
 
 echo "Installing Nova Agent host dependencies..."
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables novnc websockify systemd-container debootstrap util-linux
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git openssl rsync qemu-system-x86 qemu-utils iproute2 nftables novnc websockify systemd-container debootstrap util-linux lxc dnsmasq-base
 
-if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-  echo "Node.js/npm are not installed. Installing the Debian packages..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm
-else
-  echo "Using existing Node.js $(node --version) and npm $(npm --version)."
+if [[ -z "${TOKEN}" ]]; then TOKEN="$(openssl rand -hex 32)"; fi
+
+NODE_MAJOR="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true)"
+if [[ -z "${NODE_MAJOR}" || "${NODE_MAJOR}" -lt 20 ]]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
 fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo 'The existing Node.js installation has no npm. Install npm for that Node.js distribution and re-run.'
+  exit 1
+fi
+echo "Using Node.js $(node --version) and npm $(npm --version)."
 
 if [[ -e /dev/kvm ]]; then
   echo "Nova acceleration: KVM hardware acceleration available."
@@ -41,37 +54,12 @@ if [[ "${SOURCE_DIR}" != "${APP_DIR}" ]]; then
 fi
 
 cd "${APP_DIR}"
-npm install
+npm ci --include=dev
 npm run build
 
-NETWORK_MODE="user"
-if ip link show "${BRIDGE}" >/dev/null 2>&1 || ip link add name "${BRIDGE}" type bridge >/dev/null 2>&1; then
-  if ip addr add "${BRIDGE_ADDR}" dev "${BRIDGE}" >/dev/null 2>&1 || ip -4 addr show dev "${BRIDGE}" | grep -q "${BRIDGE_ADDR%/*}"; then
-    if ip link set "${BRIDGE}" up >/dev/null 2>&1; then
-      NETWORK_MODE="bridge"
-    fi
-  fi
-fi
-
-if [[ "${NETWORK_MODE}" == "bridge" ]]; then
-  cat >/etc/sysctl.d/99-nova-agent.conf <<EOF
-net.ipv4.ip_forward=1
-EOF
-  sysctl --system >/dev/null 2>&1 || true
-
-  if [[ -n "${UPLINK}" ]] && command -v nft >/dev/null 2>&1; then
-    nft list table inet nova_agent >/dev/null 2>&1 || nft add table inet nova_agent >/dev/null 2>&1 || true
-    nft list chain inet nova_agent forward >/dev/null 2>&1 || nft 'add chain inet nova_agent forward { type filter hook forward priority 0; policy accept; }' >/dev/null 2>&1 || true
-    nft list table ip nova_agent_nat >/dev/null 2>&1 || nft add table ip nova_agent_nat >/dev/null 2>&1 || true
-    nft list chain ip nova_agent_nat postrouting >/dev/null 2>&1 || nft 'add chain ip nova_agent_nat postrouting { type nat hook postrouting priority 100; policy accept; }' >/dev/null 2>&1 || true
-    if ! nft list chain ip nova_agent_nat postrouting 2>/dev/null | grep -q "10.88.0.0/24.*masquerade"; then
-      nft add rule ip nova_agent_nat postrouting ip saddr 10.88.0.0/24 oifname "${UPLINK}" masquerade >/dev/null 2>&1 || true
-    fi
-  fi
-else
-  BRIDGE="user"
-  echo "Nova networking: bridge/TAP unavailable; QEMU user-mode NAT will be used."
-fi
+# The agent owns bridge, DHCP and NAT setup and restores them at each start.
+# Do not move or reconfigure the host's management uplink.
+NETWORK_MODE="bridge"
 
 cat >/etc/novacloud-agent.env <<EOF
 NOVA_AGENT_PORT=9443
@@ -79,17 +67,21 @@ NOVA_AGENT_BIND=${AGENT_BIND}
 NOVA_AGENT_TOKEN=${TOKEN}
 NOVA_AGENT_STATE_DIR=${STATE_DIR}
 NOVA_AGENT_BRIDGE=${BRIDGE}
+NOVA_AGENT_CIDR=${CIDR}
+NOVA_AGENT_DNS=${DNS}
 EOF
 chmod 600 /etc/novacloud-agent.env
 
 cat >/etc/systemd/system/nova-agent.service <<EOF
 [Unit]
 Description=Cyverax Nova Compute Agent
+PartOf=novacloud.service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+Delegate=yes
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=/etc/novacloud-agent.env
 ExecStart=/usr/bin/node ${APP_DIR}/dist/nova-agent.cjs
@@ -118,11 +110,28 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now nova-agent
-systemctl enable --now nova-novnc
+systemctl enable nova-agent
+systemctl restart nova-agent
+systemctl enable nova-novnc
+systemctl restart nova-novnc
 
 echo
-echo "Nova Agent installed."
+HEALTH_BIND="${AGENT_BIND}"
+if [[ "${HEALTH_BIND}" == 0.0.0.0 ]]; then HEALTH_BIND=127.0.0.1; fi
+if [[ "${HEALTH_BIND}" == :: ]]; then HEALTH_BIND='[::1]'; fi
+HEALTHY=false
+for _ in {1..30}; do
+  if curl -fsS -H "Authorization: Bearer ${TOKEN}" "http://${HEALTH_BIND}:9443/v1/health" >/dev/null; then
+    HEALTHY=true
+    break
+  fi
+  sleep 1
+done
+if [[ "${HEALTHY}" != true ]]; then
+  journalctl -u nova-agent -n 50 --no-pager
+  exit 1
+fi
+echo "Nova Agent installed and responding."
 echo "Host: $(hostname)"
 echo "Port: 9443"
 echo "Network mode: ${NETWORK_MODE}"
@@ -130,7 +139,7 @@ echo "Bridge: ${BRIDGE}"
 echo "Acceleration: $([[ -e /dev/kvm ]] && echo KVM || echo QEMU-TCG)"
 echo
 echo "Controller configuration:"
-echo "NOVA_AGENT_URL=http://$(hostname -I | awk '{print $1}'):9443"
+echo "NOVA_AGENT_URL=http://${HEALTH_BIND}:9443"
 echo "NOVA_AGENT_TOKEN=${TOKEN}"
 echo
 echo "Protect this token. It grants compute-host control."
