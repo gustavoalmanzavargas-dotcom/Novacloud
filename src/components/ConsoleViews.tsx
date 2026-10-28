@@ -1,4 +1,5 @@
 import React, { useState, useEffect, createContext, useContext } from "react";
+import { HomeDashboard } from "./views/HomeDashboard";
 import { request, exportJson, bytes, date } from "../services/console";
 
 export const SessionContext = createContext<any>({});
@@ -1063,7 +1064,7 @@ export function StorageManager() {
   );
 }
 
-export function ComputeManager() {
+export function ComputeManager({ activeSubTab }: { activeSubTab?: string } = {}) {
   const vms = useLoad("/api/compute/vms"),
     options = useLoad("/api/compute/options", null),
     volumes = useLoad("/api/storage/volumes"),
@@ -1076,6 +1077,10 @@ export function ComputeManager() {
     [imageUrl, setImageUrl] = useState(""),
     [filename, setFilename] = useState(""),
     [volumeId, setVolumeId] = useState("");
+  useEffect(() => {
+    const mapped: Record<string, string> = { vms: 'instances', 'instance-groups': 'autoscaling', images: 'images', 'ssh-keys': 'ssh-keys' };
+    setTab(mapped[activeSubTab || 'vms'] || 'instances');
+  }, [activeSubTab]);
   const [form, setForm] = useState({
     name: "",
     cores: 2,
@@ -1960,65 +1965,17 @@ export function SecurityManager() {
     </Panel>
   );
 }
-export function Overview() {
-  const { capabilities } = useSession(),
-    jobs = useLoad("/api/jobs"),
-    inventory = useLoad("/api/resources");
-  const counts = [
-    "vm",
-    "container",
-    "application",
-    "database",
-    "storage",
-    "network",
-  ].map((type) => [
-    type,
-    inventory.data.filter((r: any) => r.type === type).length,
-  ]);
-  return (
-    <>
-      <Panel title="Cloud overview" tools={<Refresh source={inventory} />}>
-        <Notice error={inventory.error} />
-        <div className="nova-metrics">
-          {counts.map(([type, count]) => (
-            <div key={type}>
-              <span>{type}</span>
-              <strong>{count}</strong>
-            </div>
-          ))}
-        </div>
-        <p>
-          Compute host: {capabilities?.host?.hostname || "Not connected"} ·{" "}
-          {capabilities?.host?.capabilities?.acceleration ||
-            "No execution capability reported"}
-        </p>
-        {capabilities?.error && (
-          <div className="nova-warning">{capabilities.error}</div>
-        )}
-        <p>
-          Inventory reflects the last successful synchronization. Use Refresh
-          connection in the header to resample host capabilities.
-        </p>
-      </Panel>
-      <Panel title="Jobs" tools={<Refresh source={jobs} />}>
-        <Notice error={jobs.error} />
-        <Table
-          headings={["Kind", "Status", "Created", "Finished", "Error"]}
-          empty={!jobs.data.length}
-        >
-          {jobs.data.map((j: any) => (
-            <tr key={j.id}>
-              <td>{j.kind}</td>
-              <td>{j.status}</td>
-              <td>{date(j.createdAt || j.created_at)}</td>
-              <td>{date(j.finishedAt || j.finished_at)}</td>
-              <td>{j.error || "—"}</td>
-            </tr>
-          ))}
-        </Table>
-      </Panel>
-    </>
-  );
+export function Overview({ themeMode, onNavigate, onCreate }: any) {
+  const { capabilities } = useSession();
+  const inventory = useLoad('/api/resources'), activity = useLoad('/api/activity');
+  const byType = (type: string) => inventory.data.filter((r: any) => r.type === type).map((r: any) => ({ id: r.id, ...r.data }));
+  return <>
+    <Notice error={inventory.error || activity.error} />
+    <HomeDashboard themeMode={themeMode} onNavigate={onNavigate} onOpenCreateResource={onCreate}
+      onSelectVM={() => onNavigate('compute')} vms={byType('vm')} applications={byType('application')}
+      databases={byType('database')} storage={byType('storage')} activities={activity.data}
+      agentState={capabilities || { connected: false }} />
+  </>;
 }
 
 export function ClientManager() {

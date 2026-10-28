@@ -58,3 +58,7 @@ writes use the actual PostgreSQL-backed handlers.
 KVM guest boot, native LXC guest boot, guest DHCP/DNS and reboot recovery still
 need acceptance testing on the deployment host. These tests do not establish
 multi-tenant production isolation or AWS/GCP/Azure/Oracle feature parity.
+
+## Existing visual design
+
+The console retains the established Cyverax Nova brand header, expandable icon navigation, slate/cyan palette, system appearance, resource launcher, command palette, shell drawer, and original dashboard layout. Functional work must preserve this design. Real workspace settings and signed-in identity replace the old demonstration organization and profile. Navigation labels do not include fabricated counts or service guarantees.

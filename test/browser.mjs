@@ -102,43 +102,35 @@ try {
   await page.locator("input[type=email]").fill(h.email);
   await page.locator("input[type=password]").fill("test-password-123");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
-  const tabs = [
-    "Overview",
-    "Compute",
-    "Containers",
-    "Applications",
-    "Databases",
-    "Storage",
-    "Networking",
-    "Backups",
-    "Client workloads",
-    "Users & access",
-    "Security",
-    "Monitoring",
-    "Service logs",
-    "Activity & audit",
-    "Nova AI",
-    "Developer tools",
-    "Billing",
-    "Marketplace",
-    "Settings",
-  ];
-  for (const label of tabs) {
-    await page
-      .locator("nav")
-      .getByRole("link", { name: label, exact: true })
-      .click();
-    await page
-      .getByRole("heading", { name: label, exact: true })
-      .first()
-      .waitFor();
-    assert.ok((await page.locator("main").innerText()).length > 50, label);
+  await page.getByRole("heading", { name: "Welcome to Cyverax Nova", exact: true }).waitFor();
+  const tabs = ['home', 'compute', 'containers', 'applications', 'databases', 'storage', 'networking', 'backups', 'clients', 'iam', 'security', 'monitoring', 'logs', 'activity', 'ai', 'dev-tools', 'billing', 'marketplace', 'settings'];
+  const navIds = { home: 'home', applications: 'sub-workloads', clients: 'client-instances' };
+  async function navigate(key) {
+    if (key === 'applications' && !(await page.locator('#nav-sub-workloads-btn').isVisible())) await page.locator('#nav-containers-btn').click();
+    await page.locator(`#nav-${navIds[key] || key}-btn`).click();
+    await page.waitForFunction(key => location.hash === `#${key}`, key);
   }
-  await page
-    .locator("nav")
-    .getByRole("link", { name: "Users & access", exact: true })
-    .click();
+  for (const key of tabs) {
+    await navigate(key);
+    assert.ok((await page.locator('main').innerText()).length > 50, key);
+  }
+  // Keep the established Cyverax header, expandable icon sidebar and system theme.
+  await page.locator('#cyverax-top-navigation').waitFor();
+  assert.ok(await page.locator('#cyverax-logo-button').innerText().then(t => t.includes('CYVERAX')));
+  await page.locator('#sidebar-collapse-toggle-btn').click();
+  await page.waitForFunction(() => Math.round(document.querySelector('#cyverax-left-sidebar').getBoundingClientRect().width) === 56);
+  await page.locator('#sidebar-collapse-toggle-btn').click();
+  await page.locator('#global-search-bar-trigger').click();
+  await page.getByPlaceholder(/Type a command/).fill('Databases');
+  await page.getByText('Go to Databases', { exact: true }).click();
+  await page.locator('#global-create-resource-btn').click();
+  await page.locator('#create-resource-launcher-dialog').waitFor();
+  await page.keyboard.press('Escape');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.classList.contains('light'));
+  await page.screenshot({ path: '/tmp/nova-restored-light.png', fullPage: true, animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await navigate('iam');
   await page.getByRole("button", { name: "Add user", exact: true }).click();
   await page
     .getByLabel("Display name", { exact: true })
@@ -153,10 +145,7 @@ try {
   await page
     .getByRole("cell", { name: "browser-operator@example.test", exact: true })
     .waitFor();
-  await page
-    .locator("nav")
-    .getByRole("link", { name: "Databases", exact: true })
-    .click();
+  await navigate('databases');
   await page.getByLabel("Database name", { exact: true }).fill("Browser DB");
   await page
     .getByRole("button", { name: "Create database", exact: true })
@@ -190,10 +179,7 @@ try {
     ).rows[0].count,
     0,
   );
-  await page
-    .locator("nav")
-    .getByRole("link", { name: "Settings", exact: true })
-    .click();
+  await navigate('settings');
   await page
     .getByLabel("Organization name", { exact: true })
     .fill("Browser Nova");
@@ -210,10 +196,7 @@ try {
     await page.getByLabel("Organization name", { exact: true }).inputValue(),
     "Browser Nova",
   );
-  await page
-    .locator("nav")
-    .getByRole("link", { name: "Compute", exact: true })
-    .click();
+  await navigate('compute');
   await page.getByLabel("Network", { exact: true }).waitFor();
   assert.equal(
     await page.getByLabel("Network", { exact: true }).locator("option").count(),
@@ -240,14 +223,13 @@ try {
   await page
     .getByRole("button", { name: "Toggle navigation", exact: true })
     .click();
-  await page
-    .locator("nav")
-    .getByRole("link", { name: "Users & access", exact: true })
-    .click();
+  await navigate('iam');
   await page
     .getByRole("heading", { name: "Users & access", exact: true })
     .first()
     .waitFor();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile console fits viewport');
+  await page.screenshot({ path: '/tmp/nova-restored-mobile.png', animations: 'disabled' });
   assert.deepEqual(errors, []);
   console.log(
     "Browser checks passed: all 19 tabs, account creation, database SQL/rename/delete, persisted settings, capability controls and mobile navigation.",
