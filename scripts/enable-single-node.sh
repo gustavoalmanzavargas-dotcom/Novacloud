@@ -15,7 +15,8 @@ if [[ ! -f "${APP_DIR}/package.json" || ! -f "${ENV_FILE}" ]]; then
 fi
 
 cd "${APP_DIR}"
-TOKEN="$(openssl rand -hex 32)"
+TOKEN="$(sed -n 's/^NOVA_AGENT_TOKEN=//p' /etc/novacloud-agent.env 2>/dev/null || true)"
+if [[ -z "${TOKEN}" ]]; then TOKEN="$(openssl rand -hex 32)"; fi
 
 echo "Enabling Nova single-node mode..."
 echo "This host will run the controller and Nova Agent."

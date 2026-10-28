@@ -87,16 +87,68 @@ NOVA_AGENT_TOKEN=THE-TOKEN-PRINTED-BY-THE-AGENT-INSTALLER
 Keep the agent token secret. It grants host-control authority.
 
 
-## Update an installed controller
+## Update an installed controller and local agent
+
+After checking out the reviewed release in `/opt/novacloud`, run:
 
 ```bash
-cd /opt/novacloud
-sudo git pull
-sudo npm install
-sudo npm run db:migrate
-sudo npm run build
-sudo systemctl restart novacloud
+sudo bash scripts/update.sh
 ```
+
+The updater builds the controller and agent, applies the schema, updates an installed
+local agent, preserves its credential and bind address, and upgrades the existing
+Nova Nginx configuration for large uploads, long operations, SSE and WebSockets.
+It preserves the configured hostname and TLS certificate paths. A failed Nginx
+validation restores the previous configuration.
+
+## Native container runtime and host requirements
+
+Nova's controller, agent protocol, state files, resource configuration, lifecycle
+handlers, image transfer logic and console routing are Nova code. LXC and QEMU
+execute Linux container and VM operations underneath that code; Nova does not
+call another cloud control plane. This implementation was written for Nova.
+
+New containers use Nova-generated native LXC configurations and Debian 13 root
+filesystems. Existing nspawn containers retain their runtime. New LXC guests get
+an `eth0` veth, DHCP, DNS and resource limits. The agent restores its managed
+bridges, DHCP processes and NAT rules when it starts.
+
+The default private subnet is `10.88.0.0/24`. Set `NOVA_AGENT_CIDR` and
+`NOVA_AGENT_DNS` in `/etc/novacloud-agent.env` to use another subnet or DNS servers.
+Choose a subnet that does not overlap the host LAN or another routed network.
+Nova does not move the host management uplink onto a bridge.
+
+Inside an outer LXC, installing commands alone does not grant permission to run
+nested containers. Nova probes mount/network namespaces, cgroup delegation,
+veth creation and the configured bridge. The container UI displays the failed
+check. The outer host must grant the required nesting and network permissions.
+Nova never changes the outer host's configuration through a management API.
+
+KVM and container support are independent. VMs can use QEMU software acceleration
+without `/dev/kvm`. Where bridge/TAP permissions are unavailable, explicitly select
+`user` networking for a VM. Nova does not silently substitute networking modes.
+A cloud disk image may still require its own guest login and OS configuration.
+
+For a remote controller, set `NOVA_AGENT_BIND` to a reachable management address
+on the compute host, and configure the controller's agent URL/token. Console
+traffic travels through the authenticated agent connection; the noVNC gateway
+stays on the compute host's loopback interface. New agents default to loopback.
+
+## Validation
+
+```bash
+npm ci
+npm run lint
+npm run build
+npm test
+```
+
+Tests cover transfer failures and atomic image publication, resource validation,
+terminal exit codes, application working directories, authenticated agent API
+requests, controller database errors, console proxying and Nginx upgrades.
+Tests do not certify KVM or nested LXC on a deployment host. Verify guest boot,
+DHCP/DNS, console access, stop/start and host reboot recovery on that host before
+relying on it for workloads.
 
 ## Troubleshooting
 

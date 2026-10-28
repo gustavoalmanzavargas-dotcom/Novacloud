@@ -80,7 +80,7 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
       setContainers((current) => [body, ...current.filter((item) => item.id !== body.id)]);
       setShowCreate(false);
       setForm({ name: '', base: 'debian-13', cpuLimit: 1, memoryMb: 1024 });
-      notify(`Container "${body.name}" created with real systemd-nspawn runtime.`);
+      notify(`Container "${body.name}" created and started.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Container creation failed');
     } finally {
@@ -179,7 +179,7 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
             <h1 className="text-xl font-bold">Containers</h1>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Nova-native systemd-nspawn containers. Containers use a terminal console; virtual machines use noVNC.
+            Nova-managed Linux containers. Containers use a terminal console; virtual machines use noVNC.
           </p>
         </div>
         <button
@@ -193,7 +193,7 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
 
       {!options?.available && !loading && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300">
-          The connected Nova host does not currently expose the systemd-nspawn container runtime. Re-run the current Nova Agent installer on the host.
+          {options?.reason || 'The host cannot run native containers. Update Nova Agent and check its host capabilities.'}
         </div>
       )}
 
@@ -293,7 +293,7 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
                 </div>
               </div>
               <div className={`rounded-lg border p-3 text-[11px] ${isLight ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-slate-700 bg-slate-950/60 text-slate-400'}`}>
-                Network: isolated private namespace. Console: terminal. Initial Debian rootfs creation can take a few minutes.
+                Network: Nova bridge with DHCP and outbound NAT. Console: terminal. Initial Debian rootfs creation can take a few minutes.
               </div>
               <div className={`flex justify-end gap-2 pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>
                 <button type="button" onClick={() => setShowCreate(false)} disabled={working} className={`px-3 py-2 border rounded-lg ${isLight ? 'border-slate-300 text-slate-700 hover:bg-slate-50' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}`}>Cancel</button>

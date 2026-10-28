@@ -12,9 +12,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - run: npm test
+      - run: bash -n scripts/update.sh
       - run: bash -n install.sh
       - run: bash -n scripts/install-nova-agent.sh
       - run: bash -n scripts/enable-single-node.sh

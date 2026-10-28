@@ -12,7 +12,7 @@ import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { spawn, spawnSync } from 'child_process';
 import http from 'http';
-import net from 'net';
+import { proxyWebSocket } from './server/websocketProxy';
 import { novaAgentConfigured, novaAgentRequest, novaAgentUpload } from './server/novaAgentClient';
 
 dotenv.config();
@@ -32,6 +32,18 @@ const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const PgStore = connectPgSimple(session);
 const app = express();
+// Express 4 needs rejected promises forwarded explicitly to error middleware.
+for (const method of ['get', 'post', 'patch', 'delete'] as const) {
+  const register = app[method].bind(app);
+  (app as any)[method] = (route: string, ...handlers: any[]) => {
+    if (!handlers.length) return (register as any)(route);
+    return register(route, ...handlers.map(handler =>
+      (req: Request, res: Response, next: NextFunction) => {
+        try { Promise.resolve(handler(req, res, next)).catch(next); } catch (error) { next(error); }
+      }
+    ));
+  };
+}
 const port = Number(process.env.PORT || 3000);
 
 const novaAgentUrl = String(process.env.NOVA_AGENT_URL || 'http://127.0.0.1:9443');
@@ -258,7 +270,11 @@ async function syncNovaAgentInventory() {
     containers: containerIds.length,
     timestamp: new Date().toISOString(),
   });
-  })().finally(() => {
+  })().catch(async error => {
+    await pool.query("UPDATE nova_hosts SET status = 'offline' WHERE endpoint = $1", [novaAgentUrl]).catch(() => undefined);
+    publishNovaEvent('host-offline', { error: error instanceof Error ? error.message : 'Agent unavailable' });
+    throw error;
+  }).finally(() => {
     novaSyncInFlight = null;
   });
   return novaSyncInFlight;
@@ -659,7 +675,7 @@ app.post('/api/clients', requireAuth, async (req, res) => {
       [`tenant:${vm.id}`, tenant],
     );
     await finishJob(jobId, 'succeeded', { tenantId: saved.rows[0].id, networkId: network.id, vmId: vm.id });
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     const row = saved.rows[0];
     res.status(201).json({ id: row.id, ...row.data, updatedAt: row.updated_at });
   } catch (error) {
@@ -742,7 +758,7 @@ app.post('/api/marketplace/install', requireAuth, async (_req, res) => {
 app.get('/api/nova/host', requireAuth, async (_req, res) => {
   try {
     const host = await novaAgentRequest('/v1/host');
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.json({ configured: true, connected: true, host });
   } catch (error) {
     res.status(502).json({
@@ -754,6 +770,7 @@ app.get('/api/nova/host', requireAuth, async (_req, res) => {
 });
 
 app.post('/api/nova/sync', requireAuth, async (_req, res) => {
+  if (!novaAgentConfigured()) return res.status(503).json({ error: 'Nova Agent is not configured' });
   try {
     await syncNovaAgentInventory();
     res.json({ success: true, syncedAt: new Date().toISOString() });
@@ -770,8 +787,10 @@ app.get('/api/containers/options', requireAuth, async (_req, res) => {
       host: { id: host.id, name: host.hostname },
       available: Boolean(host.capabilities?.containers),
       runtime: host.capabilities?.containerRuntime || 'none',
+      reason: host.capabilities?.containerDiagnostics?.reason || host.capabilities?.networkError || null,
+      diagnostics: host.capabilities?.containerDiagnostics || null,
       bases: [{ id: 'debian-13', name: 'Debian 13 Minimal' }],
-      networks: [{ id: 'private', name: 'Private namespace (isolated)' }],
+      networks: [{ id: host.capabilities?.bridge, name: 'Nova bridge with DHCP' }],
     });
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to read container options' });
@@ -797,7 +816,7 @@ app.post('/api/containers', requireAuth, async (req, res) => {
       name, cpuLimit, memoryMb, base, start: true,
     }, 360000);
     await finishJob(jobId, 'succeeded', container);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(201).json({ ...container, jobId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Container creation failed';
@@ -816,7 +835,7 @@ app.post('/api/containers/:id/action', requireAuth, async (req, res) => {
       { action },
       60000,
     );
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.json(container);
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Container action failed' });
@@ -840,7 +859,7 @@ app.post('/api/containers/:id/exec', requireAuth, async (req, res) => {
 app.delete('/api/containers/:id', requireAuth, async (req, res) => {
   try {
     await novaAgentRequest(`/v1/containers/${encodeURIComponent(req.params.id)}`, 'DELETE', undefined, 60000);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(204).end();
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Container deletion failed' });
@@ -851,12 +870,14 @@ app.get('/api/compute/options', requireAuth, async (_req, res) => {
   try {
     const host = await novaAgentRequest('/v1/host');
     const images = await novaAgentRequest('/v1/images');
+    const networks = await novaAgentRequest('/v1/networks');
     res.json({
       configured: true,
       hosts: [{ id: host.id, name: host.hostname }],
       nodes: [host.hostname],
       storages: [{ node: host.hostname, storage: 'nova-local', type: 'qcow2' }],
-      bridges: [host.capabilities?.bridge || 'novabr0'],
+      bridges: [...new Set([...(host.capabilities?.tapNetworking ? [host.capabilities.bridge] : []), ...(Array.isArray(networks) ? networks.filter((n: any) => n.mode === 'bridge').map((n: any) => n.bridge) : []), 'user'])],
+      capabilities: host.capabilities,
       images,
     });
   } catch (error) {
@@ -888,7 +909,7 @@ app.post('/api/compute/vms', requireAuth, async (req, res) => {
       start: bootMode === 'image',
     });
     await finishJob(jobId, 'succeeded', vm);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     await pool.query(
       `INSERT INTO activity_events (actor, action, resource, status)
        VALUES ($1, 'compute.create', $2, 'SUCCESS')`,
@@ -907,11 +928,12 @@ app.get('/api/compute/vms/:id/console', requireAuth, async (req, res) => {
     const consoleInfo = await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.id)}/console`);
     if (!consoleInfo?.running) return res.status(409).json({ error: 'Start the VM before opening its graphical console' });
     const vm = String(req.params.id);
+    const expires = String(Date.now() + 60000);
     const signature = crypto
       .createHmac('sha256', String(process.env.SESSION_SECRET))
-      .update(vm)
+      .update(`${vm}:${expires}`)
       .digest('hex');
-    const pathValue = `api/compute/console-ws?vm=${encodeURIComponent(vm)}&sig=${signature}`;
+    const pathValue = `api/compute/console-ws?vm=${encodeURIComponent(vm)}&expires=${expires}&sig=${signature}`;
     res.json({
       type: 'novnc',
       vm,
@@ -954,7 +976,7 @@ app.post('/api/compute/images/upload', requireAuth, async (req, res) => {
   try {
     const image = await novaAgentUpload(filename, req, Number.isFinite(lengthHeader) ? lengthHeader : undefined);
     await finishJob(jobId, 'succeeded', image);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(201).json({ success: true, jobId, ...image });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Image upload failed';
@@ -968,9 +990,9 @@ app.post('/api/compute/images/import-url', requireAuth, async (req, res) => {
   const filename = String(req.body?.filename || '').trim();
   const jobId = await createJob('image.import', req.session.userId, 'image', filename || null, { url, filename });
   try {
-    const image = await novaAgentRequest('/v1/images/import-url', 'POST', { url, filename });
+    const image = await novaAgentRequest('/v1/images/import-url', 'POST', { url, filename }, 900000);
     await finishJob(jobId, 'succeeded', image);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(201).json({ success: true, jobId, ...image });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Image import failed';
@@ -1044,7 +1066,7 @@ app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
       result = await novaAgentRequest(`/v1/instances/${encodeURIComponent(id)}/action`, 'POST', { action });
     }
     await finishJob(jobId, 'succeeded', result);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     await pool.query(
       `INSERT INTO activity_events (actor, action, resource, status)
        VALUES ($1, $2, $3, 'SUCCESS')`,
@@ -1252,9 +1274,9 @@ app.post('/api/applications', requireAuth, async (req, res) => {
   };
   const jobId = await createJob('application.deploy', req.session.userId, 'application', null, payload);
   try {
-    const appState = await novaAgentRequest('/v1/apps', 'POST', payload);
+    const appState = await novaAgentRequest('/v1/apps', 'POST', payload, 900000);
     await finishJob(jobId, 'succeeded', appState);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(201).json({ ...appState, jobId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Application deployment failed';
@@ -1267,9 +1289,9 @@ app.post('/api/applications/:id/redeploy', requireAuth, async (req, res) => {
   const id = String(req.params.id || '');
   const jobId = await createJob('application.redeploy', req.session.userId, 'application', id, {});
   try {
-    const appState = await novaAgentRequest(`/v1/apps/${encodeURIComponent(id)}/redeploy`, 'POST', {});
+    const appState = await novaAgentRequest(`/v1/apps/${encodeURIComponent(id)}/redeploy`, 'POST', {}, 900000);
     await finishJob(jobId, 'succeeded', appState);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.json({ ...appState, jobId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Application redeploy failed';
@@ -1285,7 +1307,7 @@ app.post('/api/applications/:id/action', requireAuth, async (req, res) => {
       'POST',
       { action: String(req.body?.action || '') },
     );
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.json(appState);
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Application action failed' });
@@ -1316,7 +1338,7 @@ app.post('/api/networking/vpcs', requireAuth, async (req, res) => {
   try {
     const network = await novaAgentRequest('/v1/networks', 'POST', { name, cidr, nat });
     await finishJob(jobId, 'succeeded', network);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(201).json({ ...network, jobId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Network creation failed';
@@ -1331,7 +1353,7 @@ app.delete('/api/networking/vpcs/:id', requireAuth, async (req, res) => {
   try {
     await novaAgentRequest(`/v1/networks/${encodeURIComponent(id)}`, 'DELETE');
     await finishJob(jobId, 'succeeded', {});
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(204).end();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Network deletion failed';
@@ -1363,7 +1385,7 @@ app.post('/api/storage/volumes', requireAuth, async (req, res) => {
   try {
     const volume = await novaAgentRequest('/v1/volumes', 'POST', { name, sizeGb });
     await finishJob(jobId, 'succeeded', volume);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(201).json({ ...volume, jobId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Volume creation failed';
@@ -1379,7 +1401,7 @@ app.patch('/api/storage/volumes/:id', requireAuth, async (req, res) => {
   try {
     const volume = await novaAgentRequest(`/v1/volumes/${encodeURIComponent(id)}`, 'PATCH', { sizeGb });
     await finishJob(jobId, 'succeeded', volume);
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.json({ ...volume, jobId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Volume resize failed';
@@ -1394,7 +1416,7 @@ app.delete('/api/storage/volumes/:id', requireAuth, async (req, res) => {
   try {
     await novaAgentRequest(`/v1/volumes/${encodeURIComponent(id)}`, 'DELETE');
     await finishJob(jobId, 'succeeded', {});
-    await syncNovaAgentInventory();
+    await syncNovaAgentInventory().catch(error => console.error('Inventory refresh failed after operation', error));
     res.status(204).end();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Volume deletion failed';
@@ -1628,6 +1650,12 @@ app.post('/api/ai/query', requireAuth, async (req, res) => {
   }
 });
 
+app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown Nova API endpoint' }));
+app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Nova API request failed', error);
+  if (!res.headersSent) res.status(error.status || 500).json({ error: error.status === 400 ? 'Invalid request body' : 'Nova request failed' });
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
@@ -1667,28 +1695,18 @@ async function startServer() {
       }
       const vm = String(requestUrl.searchParams.get('vm') || '');
       const sig = String(requestUrl.searchParams.get('sig') || '');
+      const expires = String(requestUrl.searchParams.get('expires') || '');
       const expected = crypto
         .createHmac('sha256', String(process.env.SESSION_SECRET))
-        .update(vm)
+        .update(`${vm}:${expires}`)
         .digest('hex');
-      if (!vm || sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+      if (!vm || !/^\d+$/.test(expires) || Number(expires) < Date.now() || sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
         socket.destroy();
         return;
       }
 
-      const upstream = net.createConnection({ host: '127.0.0.1', port: 6080 }, () => {
-        const headers = Object.entries(req.headers)
-          .filter(([key]) => key.toLowerCase() !== 'host')
-          .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value || ''}\r\n`)
-          .join('');
-        upstream.write(
-          `${req.method || 'GET'} /websockify?token=${encodeURIComponent(vm)} HTTP/1.1\r\nHost: 127.0.0.1:6080\r\n${headers}\r\n`
-        );
-        if (head?.length) upstream.write(head);
-        socket.pipe(upstream).pipe(socket);
-      });
-      upstream.on('error', () => socket.destroy());
-      socket.on('error', () => upstream.destroy());
+      const target = new URL(`/v1/console?vm=${encodeURIComponent(vm)}`, novaAgentUrl);
+      proxyWebSocket(req, socket, head, target, { authorization: `Bearer ${process.env.NOVA_AGENT_TOKEN || ''}` });
     } catch {
       socket.destroy();
     }
