@@ -37,7 +37,7 @@ export async function novaAgentRequest(pathname: string, method = 'GET', body?: 
           try { decoded = JSON.parse(responseBody); } catch { decoded = { raw: responseBody }; }
         }
         if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(decoded?.error || `Nova Agent returned HTTP ${response.statusCode || 0}`));
+          reject(Object.assign(new Error(decoded?.error || `Nova Agent returned HTTP ${response.statusCode || 0}`), { status: response.statusCode || 502 }));
           return;
         }
         resolve(decoded);
@@ -77,7 +77,7 @@ export async function novaAgentUpload(filename: string, source: NodeJS.ReadableS
           try { decoded = JSON.parse(responseBody); } catch { decoded = { raw: responseBody }; }
         }
         if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(decoded?.error || `Nova Agent returned HTTP ${response.statusCode || 0}`));
+          reject(Object.assign(new Error(decoded?.error || `Nova Agent returned HTTP ${response.statusCode || 0}`), { status: response.statusCode || 502 }));
           return;
         }
         resolve(decoded);

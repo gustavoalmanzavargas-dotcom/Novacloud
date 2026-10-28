@@ -1,451 +1,223 @@
-import React, { useState, useEffect } from 'react';
-import { TopNav } from './components/TopNav';
-import { LeftSidebar } from './components/LeftSidebar';
-import { CommandPalette } from './components/CommandPalette';
-import { CreateResourceModal } from './components/CreateResourceModal';
-import { NovaShellDrawer } from './components/NovaShellDrawer';
-import { NotificationDrawer } from './components/NotificationDrawer';
-
-// Views
-import { HomeDashboard } from './components/views/HomeDashboard';
-import { ComputeView } from './components/views/ComputeView';
-import { VmDetailView } from './components/views/VmDetailView';
-import { NetworkingView } from './components/views/NetworkingView';
-import { ApplicationsView } from './components/views/ApplicationsView';
-import { ContainersView } from './components/views/ContainersView';
-import { AiView } from './components/views/AiView';
-import { DatabasesView } from './components/views/DatabasesView';
-import { StorageView } from './components/views/StorageView';
-import { SecurityView } from './components/views/SecurityView';
-import { BillingView } from './components/views/BillingView';
-import { ActivityView } from './components/views/ActivityView';
-import { IamView } from './components/views/IamView';
-import { MonitoringView } from './components/views/MonitoringView';
-import { LogsView } from './components/views/LogsView';
-import { BackupsView } from './components/views/BackupsView';
-import { DevToolsView } from './components/views/DevToolsView';
-import { MarketplaceView } from './components/views/MarketplaceView';
-import { ClientInstancesView } from './components/views/ClientInstancesView';
-import { SettingsView } from './components/views/SettingsView';
-import { LoginScreen } from './components/LoginScreen';
-
+import React, { useEffect, useState } from "react";
+import { Cloud, Menu, LogOut } from "lucide-react";
+import { LoginScreen } from "./components/LoginScreen";
+import { ContainersView } from "./components/views/ContainersView";
+import { MonitoringView } from "./components/views/MonitoringView";
 import {
-  ActiveView,
-  ActivityEvent,
-  AIRecommendation,
-  ApplicationItem,
-  DatabaseItem,
-  NotificationItem,
-  SecurityAlert,
-  StorageItem,
-  VMInstance,
-} from './types';
+  SessionContext,
+  Overview,
+  ComputeManager,
+  DatabaseManager,
+  UserManager,
+  SettingsManager,
+  StorageManager,
+  NetworkManager,
+  ApplicationManager,
+  BackupManager,
+  ActivityManager,
+  LogManager,
+  DeveloperManager,
+  AiManager,
+  SecurityManager,
+  ClientManager,
+  BillingManager,
+  MarketplaceManager,
+} from "./components/ConsoleViews";
+import { request } from "./services/console";
 
+export const pages = [
+  ["home", "Overview"],
+  ["compute", "Compute"],
+  ["containers", "Containers"],
+  ["applications", "Applications"],
+  ["databases", "Databases"],
+  ["storage", "Storage"],
+  ["networking", "Networking"],
+  ["backups", "Backups"],
+  ["clients", "Client workloads"],
+  ["iam", "Users & access"],
+  ["security", "Security"],
+  ["monitoring", "Monitoring"],
+  ["logs", "Service logs"],
+  ["activity", "Activity & audit"],
+  ["ai", "Nova AI"],
+  ["dev-tools", "Developer tools"],
+  ["billing", "Billing"],
+  ["marketplace", "Marketplace"],
+  ["settings", "Settings"],
+];
 export default function App() {
-  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'anonymous'>('loading');
-  // Navigation State
-  const [activeView, setActiveView] = useState<ActiveView>('home');
-  const [activeSubTab, setActiveSubTab] = useState<string | undefined>(undefined);
-  const [selectedVM, setSelectedVM] = useState<VMInstance | null>(null);
-  const [marketplaceClientId, setMarketplaceClientId] = useState<string | undefined>(undefined);
-
-  // App Shell States
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const getSystemTheme = (): 'dark' | 'light' => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'dark';
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  };
-  const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() => getSystemTheme());
-  const [selectedEnvironment, setSelectedEnvironment] = useState('Production');
-  const [selectedRegion, setSelectedRegion] = useState('us-atl-1');
-
-  // System theme is authoritative. Nova follows OS/browser appearance changes live.
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const applySystemTheme = (dark: boolean) => setThemeMode(dark ? 'dark' : 'light');
-    applySystemTheme(media.matches);
-    const listener = (event: MediaQueryListEvent) => applySystemTheme(event.matches);
-    if (typeof media.addEventListener === 'function') media.addEventListener('change', listener);
-    else if (typeof (media as any).addListener === 'function') (media as any).addListener(listener);
-    return () => {
-      if (typeof media.removeEventListener === 'function') media.removeEventListener('change', listener);
-      else if (typeof (media as any).removeListener === 'function') (media as any).removeListener(listener);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (themeMode === 'light') {
-      document.documentElement.classList.remove('dark');
-      document.documentElement.classList.add('light');
-      document.body.style.backgroundColor = '#f1f5f9';
-      document.body.style.color = '#0f172a';
-    } else {
-      document.documentElement.classList.remove('light');
-      document.documentElement.classList.add('dark');
-      document.body.style.backgroundColor = '#020617';
-      document.body.style.color = '#f8fafc';
+  const [user, setUser] = useState<any>(null),
+    [starting, setStarting] = useState(true),
+    [error, setError] = useState(""),
+    [capabilities, setCapabilities] = useState<any>(null),
+    [settings, setSettings] = useState<any>(null),
+    [filter, setFilter] = useState(""),
+    [menu, setMenu] = useState(false);
+  const getPage = () =>
+    pages.some(([key]) => key === location.hash.slice(1))
+      ? location.hash.slice(1)
+      : "home";
+  const [page, setPage] = useState(getPage),
+    [theme, setTheme] = useState<"dark" | "light">(() =>
+      matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+    );
+  const refresh = async () => {
+    try {
+      const [caps, workspace] = await Promise.all([
+        request("/api/capabilities"),
+        request("/api/settings"),
+      ]);
+      setCapabilities(caps);
+      setSettings(workspace);
+      setError("");
+    } catch (e: any) {
+      setError(e.message);
     }
-  }, [themeMode]);
-
-  // Drawers & Modals
-  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isShellOpen, setIsShellOpen] = useState(false);
-  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
-  const [launchDeployDirectly, setLaunchDeployDirectly] = useState(false);
-
-  // Domain Data State
-  const [vms, setVms] = useState<VMInstance[]>([]);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [applications, setApplications] = useState<ApplicationItem[]>([]);
-  const [databases, setDatabases] = useState<DatabaseItem[]>([]);
-  const [storage, setStorage] = useState<StorageItem[]>([]);
-  const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>([]);
-  const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
-  const [activities, setActivities] = useState<ActivityEvent[]>([]);
-
-  const loadDashboard = async () => {
-    const response = await fetch('/api/dashboard');
-    if (!response.ok) throw new Error('Unable to load dashboard');
-    const data = await response.json();
-    setVms(data.vms || []);
-    setApplications(data.applications || []);
-    setDatabases(data.databases || []);
-    setStorage(data.storage || []);
-    setNotifications(data.notifications || []);
-    setSecurityAlerts(data.securityAlerts || []);
-    setAiRecommendations(data.aiRecommendations || []);
-    setActivities(data.activities || []);
   };
-
+  const signIn = async () => {
+    setUser((await request("/api/auth/me")).user);
+    await refresh();
+  };
   useEffect(() => {
-    fetch('/api/auth/me')
-      .then((response) => {
-        if (!response.ok) throw new Error('anonymous');
-        return response.json();
-      })
-      .then(async () => {
-        setAuthState('authenticated');
-        await loadDashboard();
-      })
-      .catch(() => setAuthState('anonymous'));
+    signIn()
+      .catch(() => setUser(null))
+      .finally(() => setStarting(false));
   }, []);
-
   useEffect(() => {
-    if (authState !== 'authenticated') return;
-    const events = new EventSource('/api/events');
-    const refresh = () => {
-      loadDashboard().catch(() => undefined);
+    const listener = () => {
+      setPage(getPage());
+      setMenu(false);
     };
-    events.addEventListener('resource-sync', refresh);
-    events.addEventListener('job-update', refresh);
-    return () => {
-      events.removeEventListener('resource-sync', refresh);
-      events.removeEventListener('job-update', refresh);
-      events.close();
-    };
-  }, [authState]);
-
-  // Keyboard Shortcuts (Ctrl+K, `)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setIsCommandPaletteOpen((prev) => !prev);
-      } else if (e.key === '`' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
-        e.preventDefault();
-        setIsShellOpen((prev) => !prev);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener("hashchange", listener);
+    return () => window.removeEventListener("hashchange", listener);
   }, []);
-
-  const handleToggleVmStatus = async (vmId: string) => {
-    const vm = vms.find((item) => item.id === vmId);
-    if (!vm) return;
-    const action = vm.status === 'Running' ? 'shutdown' : 'start';
-    const response = await fetch(`/api/compute/vms/${encodeURIComponent(vmId)}/action`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      window.alert(body?.error || `Unable to ${action} ${vm.name}`);
-      return;
-    }
-    setVms((prev) => prev.map((item) =>
-      item.id === vmId
-        ? { ...item, status: action === 'start' ? 'Deploying' : 'Stopped' }
-        : item
-    ));
-    window.setTimeout(() => {
-      loadDashboard().catch(() => undefined);
-    }, 2000);
+  useEffect(() => {
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    const listener = () => setTheme(media.matches ? "dark" : "light");
+    media.addEventListener("change", listener);
+    return () => media.removeEventListener("change", listener);
+  }, []);
+  useEffect(() => {
+    document.documentElement.className = theme;
+  }, [theme]);
+  if (starting) return <div className="nova-loading">Loading NovaCloud…</div>;
+  if (!user) return <LoginScreen onAuthenticated={signIn} />;
+  const views: Record<string, React.ReactNode> = {
+    home: <Overview />,
+    compute: <ComputeManager />,
+    containers: <ContainersView themeMode={theme} />,
+    applications: <ApplicationManager />,
+    databases: <DatabaseManager />,
+    storage: <StorageManager />,
+    networking: <NetworkManager />,
+    backups: <BackupManager />,
+    clients: <ClientManager />,
+    iam: <UserManager />,
+    security: <SecurityManager />,
+    monitoring: <MonitoringView themeMode={theme} />,
+    logs: <LogManager />,
+    activity: <ActivityManager />,
+    ai: <AiManager />,
+    "dev-tools": <DeveloperManager />,
+    billing: <BillingManager />,
+    marketplace: <MarketplaceManager />,
+    settings: <SettingsManager />,
   };
-
-  const handleNavigate = (view: ActiveView, subTab?: string) => {
-    setSelectedVM(null);
-    setActiveView(view);
-    setActiveSubTab(subTab);
-  };
-
-  const unreadNotificationCount = (notifications || []).filter((n) => !n?.read).length;
-
-  if (authState === 'loading') {
-    return <div className="min-h-screen bg-slate-950 text-slate-300 flex items-center justify-center">Starting Cyverax Nova…</div>;
-  }
-
-  if (authState === 'anonymous') {
-    return <LoginScreen onAuthenticated={async () => { setAuthState('authenticated'); await loadDashboard(); }} />;
-  }
-
   return (
-    <div className={`min-h-screen font-sans flex flex-col ${themeMode === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-slate-100 text-slate-900'}`}>
-      {/* Top Persistent Console Header */}
-      <TopNav
-        activeEnvironment={selectedEnvironment}
-        activeRegion={selectedRegion}
-        onSelectEnvironment={setSelectedEnvironment}
-        onSelectRegion={setSelectedRegion}
-        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
-        onOpenCreateResource={() => setIsCreateModalOpen(true)}
-        onToggleCloudShell={() => setIsShellOpen((prev) => !prev)}
-        isTerminalOpen={isShellOpen}
-        onToggleNotifications={() => setIsNotificationsOpen((prev) => !prev)}
-        notifications={notifications}
-        unreadNotifications={unreadNotificationCount}
-        onToggleTheme={undefined}
-        themeMode={themeMode}
-        onNavigate={handleNavigate}
-      />
-
-      {/* Main Workbench Body: Sidebar + Dynamic Workspace Canvas */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Persistent Collapsible Left Navigation */}
-        <LeftSidebar
-          activeView={activeView}
-          activeSubTab={activeSubTab}
-          onNavigate={handleNavigate}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-          onOpenCreateResource={() => setIsCreateModalOpen(true)}
-          themeMode={themeMode}
-        />
-
-        {/* Dynamic Workspace Container */}
-        <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-6">
-          <div className="max-w-7xl mx-auto">
-            {/* View Router */}
-            {selectedVM ? (
-              <VmDetailView
-                vm={selectedVM}
-                onBack={() => setSelectedVM(null)}
-                onToggleStatus={handleToggleVmStatus}
-                themeMode={themeMode}
+    <SessionContext.Provider value={{ user, capabilities, settings, refresh }}>
+      <div className="nova-console">
+        <header className="nova-header">
+          <button
+            aria-label="Toggle navigation"
+            className="nova-mobile-menu"
+            onClick={() => setMenu(!menu)}
+          >
+            <Menu size={18} />
+          </button>
+          <a className="nova-brand" href="#home">
+            <Cloud size={23} />
+            <span>
+              NovaCloud
+              <small>{settings?.organization || "Cloud console"}</small>
+            </span>
+          </a>
+          <div className="nova-header-info">
+            <span
+              className={
+                capabilities?.connected ? "nova-online" : "nova-offline"
+              }
+            >
+              {capabilities?.connected
+                ? "Agent connected"
+                : "Agent unavailable"}
+            </span>
+            <button onClick={refresh}>Refresh connection</button>
+            <span>
+              {user.displayName} · {user.role}
+            </span>
+            <button
+              aria-label="Sign out"
+              onClick={async () => {
+                try {
+                  await request("/api/auth/logout", "POST");
+                  setUser(null);
+                } catch (e: any) {
+                  setError(e.message);
+                }
+              }}
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
+        </header>
+        <div className="nova-workbench">
+          <aside className={menu ? "nova-sidebar open" : "nova-sidebar"}>
+            <label className="nova-search">
+              <span>Find a service</span>
+              <input
+                aria-label="Find a service"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
               />
-            ) : activeView === 'home' ? (
-              <HomeDashboard
-                onNavigate={handleNavigate}
-                onOpenCreateResource={() => setIsCreateModalOpen(true)}
-                onSelectVM={(vm) => setSelectedVM(vm)}
-                vms={vms}
-                applications={applications}
-                databases={databases}
-                storage={storage}
-                activities={activities}
-                themeMode={themeMode}
-              />
-            ) : activeView === 'compute' ? (
-              <ComputeView
-                vms={vms}
-                onSelectVM={(vm) => setSelectedVM(vm)}
-                onOpenCreateInstance={() => setIsCreateModalOpen(true)}
-                onToggleStatus={handleToggleVmStatus}
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'containers' ? (
-              <ContainersView themeMode={themeMode} />
-            ) : activeView === 'applications' ? (
-              <ApplicationsView
-                applications={applications}
-                themeMode={themeMode}
-                launchWizardDirectly={launchDeployDirectly}
-                onNavigateToAi={() => handleNavigate('ai')}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'networking' ? (
-              <NetworkingView
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'ai' ? (
-              <AiView recommendations={aiRecommendations} themeMode={themeMode} />
-            ) : activeView === 'databases' ? (
-              <DatabasesView
-                databases={databases}
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'storage' ? (
-              <StorageView
-                storage={storage}
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'security' ? (
-              <SecurityView
-                securityAlerts={securityAlerts}
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'billing' ? (
-              <BillingView
-                themeMode={themeMode}
-                onNavigateToAi={() => handleNavigate('ai')}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'activity' ? (
-              <ActivityView activities={activities} themeMode={themeMode} />
-            ) : activeView === 'iam' ? (
-              <IamView
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'monitoring' ? (
-              <MonitoringView
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'logs' ? (
-              <LogsView themeMode={themeMode} />
-            ) : activeView === 'backups' ? (
-              <BackupsView themeMode={themeMode} />
-            ) : activeView === 'dev-tools' ? (
-              <DevToolsView
-                themeMode={themeMode}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : activeView === 'clients' ? (
-              <ClientInstancesView
-                themeMode={themeMode}
-                onAssumeTenant={(tenant) => {
-                  setSelectedEnvironment(`${tenant.clientCompany} (VLAN ${tenant.vlanId})`);
-                  handleNavigate('home');
-                }}
-                onNavigateToMarketplace={(clientId) => {
-                  setMarketplaceClientId(clientId);
-                  handleNavigate('marketplace');
-                }}
-              />
-            ) : activeView === 'marketplace' ? (
-              <MarketplaceView
-                themeMode={themeMode}
-                preselectedClientId={marketplaceClientId}
-                onNavigateToClients={() => handleNavigate('clients')}
-              />
-            ) : activeView === 'settings' ? (
-              <SettingsView
-                themeMode={themeMode}
-                onToggleTheme={undefined}
-                activeSubTab={activeSubTab}
-                onTabChange={(tab) => setActiveSubTab(tab)}
-              />
-            ) : (
-              <div
-                className={`p-8 rounded-xl border text-center space-y-3 ${
-                  themeMode === 'light'
-                    ? 'bg-white border-slate-200 text-slate-800'
-                    : 'bg-slate-900 border-slate-800 text-white'
-                }`}
-              >
-                <h2 className="text-base font-bold capitalize">{activeView} Workspace</h2>
-                <p className="text-xs text-slate-400 max-w-md mx-auto">
-                  Integrated telemetry and configuration for tenant org-9842 in us-atl-1. All agents are synchronized with Cyverax Nova.
-                </p>
-                <button
-                  onClick={() => handleNavigate('home')}
-                  className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded transition-colors cursor-pointer"
-                >
-                  Return to Dashboard
-                </button>
+            </label>
+            <nav>
+              {pages
+                .filter(([, label]) =>
+                  label.toLowerCase().includes(filter.toLowerCase()),
+                )
+                .map(([key, label]) => (
+                  <a
+                    href={`#${key}`}
+                    key={key}
+                    aria-current={page === key ? "page" : undefined}
+                  >
+                    {label}
+                  </a>
+                ))}
+            </nav>
+            <p className="nova-sidebar-note">
+              Nova control plane
+              <br />
+              Linux · QEMU · native containers
+            </p>
+          </aside>
+          <main className="nova-main">
+            <div className="nova-page-heading">
+              <span>
+                WORKSPACE / {pages.find(([key]) => key === page)?.[1]}
+              </span>
+              <h1>{pages.find(([key]) => key === page)?.[1]}</h1>
+            </div>
+            {error && (
+              <div role="alert" className="nova-error">
+                {error}
               </div>
             )}
-          </div>
-        </main>
+            <div key={page}>{views[page]}</div>
+          </main>
+        </div>
       </div>
-
-      {/* Global Command Palette (Ctrl+K) */}
-      <CommandPalette
-        isOpen={isCommandPaletteOpen}
-        onClose={() => setIsCommandPaletteOpen(false)}
-        onNavigate={handleNavigate}
-        onOpenCreateResource={() => {
-          setIsCommandPaletteOpen(false);
-          setIsCreateModalOpen(true);
-        }}
-        onOpenTerminal={() => {
-          setIsCommandPaletteOpen(false);
-          setIsShellOpen(true);
-        }}
-        vms={vms}
-        onSelectVM={(vm) => {
-          setIsCommandPaletteOpen(false);
-          setSelectedVM(vm);
-        }}
-        themeMode={themeMode}
-      />
-
-      {/* Global Resource Launcher Modal */}
-      <CreateResourceModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        onNavigate={handleNavigate}
-        onLaunchDeploymentWorkflow={() => {
-          setLaunchDeployDirectly(true);
-          handleNavigate('applications');
-        }}
-        themeMode={themeMode}
-      />
-
-      {/* Interactive Cloud Shell Terminal Drawer */}
-      <NovaShellDrawer
-        isOpen={isShellOpen}
-        onClose={() => setIsShellOpen(false)}
-        vms={vms}
-        themeMode={themeMode}
-      />
-
-      {/* Notifications & System Alerts Drawer */}
-      <NotificationDrawer
-        isOpen={isNotificationsOpen}
-        onClose={() => setIsNotificationsOpen(false)}
-        notifications={notifications}
-        onMarkAllAsRead={() =>
-          setNotifications((prev) => prev.map((n) => ({ ...n, read: true })))
-        }
-        onClearAll={() => setNotifications([])}
-        onMarkAsRead={(id) =>
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-          )
-        }
-        themeMode={themeMode}
-      />
-    </div>
+    </SessionContext.Provider>
   );
 }

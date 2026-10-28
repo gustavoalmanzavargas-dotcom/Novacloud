@@ -12,6 +12,12 @@ import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { spawn, spawnSync } from 'child_process';
 import http from 'http';
+import { redact } from './server/redact';
+import { registerCatalog } from './server/catalog';
+import { createAccess } from './server/access';
+import { featureMap } from './server/capabilities';
+import { execute } from './server/hostRuntime';
+import { registerManagement } from './server/management';
 import { proxyWebSocket } from './server/websocketProxy';
 import { novaAgentConfigured, novaAgentRequest, novaAgentUpload } from './server/novaAgentClient';
 
@@ -109,11 +115,11 @@ async function syncNovaAgentInventory() {
       hostname: item.name,
       created: item.createdAt,
       uptime: item.status === 'Running' ? 'Running' : '0h',
-      cpuUsagePct: 0,
-      memUsagePct: 0,
-      diskIops: 0,
-      networkInMb: 0,
-      networkOutMb: 0,
+      cpuUsagePct: null,
+      memUsagePct: null,
+      diskIops: null,
+      networkInMb: null,
+      networkOutMb: null,
       tags: {
         provider: 'nova-native',
         hostId: String(hostId || ''),
@@ -213,14 +219,14 @@ async function syncNovaAgentInventory() {
         name: appState.name,
         status: appState.status,
         domain: appState.domain || '',
-        url: appState.domain ? `https://${appState.domain}` : `http://127.0.0.1:${appState.port}`,
+        url: null,
         infrastructure: 'Nova Agent',
         lastDeployment: appState.updatedAt,
         lastDeploy: appState.updatedAt,
-        health: appState.status === 'Running' ? 'Healthy' : appState.status === 'Failed' ? 'Failed' : 'Degraded',
+        health: 'Not measured',
         replicas: 1,
-        cpuUsagePct: 0,
-        memUsageMb: 0,
+        cpuUsagePct: null,
+        memUsageMb: null,
         gitBranch: appState.branch,
         branch: appState.branch,
         port: appState.port,
@@ -285,7 +291,7 @@ async function createJob(kind: string, userId: string | undefined, resourceType:
     `INSERT INTO jobs (kind, resource_type, resource_id, requested_by, status, input)
      VALUES ($1, $2, $3, $4, 'running', $5)
      RETURNING id`,
-    [kind, resourceType, resourceId, userId || null, input || {}],
+    [kind, resourceType, resourceId, userId || null, redact(input || {})],
   );
   return result.rows[0].id as string;
 }
@@ -295,9 +301,9 @@ async function finishJob(id: string, status: 'succeeded' | 'failed', output: any
     `UPDATE jobs
      SET status = $2, output = $3, error = $4, finished_at = NOW(), updated_at = NOW()
      WHERE id = $1`,
-    [id, status, output || {}, error || null],
+    [id, status, redact(output || {}), error || null],
   );
-  publishNovaEvent('job-update', { id, status, output: output || {}, error: error || null });
+  publishNovaEvent('job-update', { id, status, output: redact(output || {}), error: error || null });
 }
 
 app.set('trust proxy', 1);
@@ -336,7 +342,10 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
+  await new Promise<void>((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
   req.session.userId = user.id;
+  const settings = (await pool.query("SELECT data FROM console_settings WHERE id='workspace'")).rows[0]?.data;
+  req.session.cookie.maxAge = Number(settings?.sessionMinutes || 480) * 60000;
   await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
   res.json({ user: { id: user.id, email: user.email, displayName: user.display_name, role: user.role } });
 });
@@ -359,19 +368,23 @@ app.get('/api/auth/me', async (req, res) => {
   res.json({ user: { id: user.id, email: user.email, displayName: user.display_name, role: user.role } });
 });
 
-async function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (!req.session.userId) return res.status(401).json({ error: 'Authentication required' });
-  next();
-}
-async function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  if (!req.session.userId) return res.status(401).json({ error: 'Authentication required' });
-  const result = await pool.query(
-    'SELECT role FROM users WHERE id = $1 AND active = TRUE',
-    [req.session.userId],
-  );
-  if (result.rows[0]?.role !== 'admin') return res.status(403).json({ error: 'Administrator access required' });
-  next();
-}
+const { auth: requireAuth, admin: requireAdmin, control: requireControl } = createAccess(pool);
+registerManagement(app, pool, requireAuth as any, requireAdmin as any);
+registerCatalog(app, pool, requireAuth as any, requireAdmin as any, novaAgentRequest);
+app.get('/api/capabilities', requireAuth, async (_req, res) => {
+  let host: any = null, error: string | null = null;
+  try { host = await novaAgentRequest('/v1/host', 'GET', undefined, 5000); }
+  catch (cause) { error = cause instanceof Error ? cause.message : 'Agent unavailable'; }
+  res.json({ connected: Boolean(host), host, error, features: featureMap(host, Boolean(host), Boolean(process.env.GEMINI_API_KEY)) });
+});
+app.get('/api/logs', requireAdmin, async (req, res) => {
+  const source = String(req.query.source || 'controller');
+  if (source === 'agent') return res.json(await novaAgentRequest('/v1/logs'));
+  if (source !== 'controller') return res.status(400).json({ error: 'Select controller or agent logs' });
+  const output = await execute('journalctl', ['-u', 'novacloud', '-n', '200', '--no-pager', '-o', 'short-iso']);
+  res.json({ source, logs: output.split('\n').filter(Boolean) });
+});
+
 
 app.post('/api/shell/exec', requireAdmin, async (req, res) => {
   const command = String(req.body?.command || '').trim();
@@ -463,7 +476,7 @@ app.get('/api/jobs', requireAuth, async (req, res) => {
        LIMIT $1`,
     [limit],
   );
-  res.json(result.rows);
+  res.json(redact(result.rows));
 });
 
 app.get('/api/hosts', requireAuth, async (_req, res) => {
@@ -514,7 +527,7 @@ async function getNovaClusterSummary() {
       gpuUnits: Array.isArray(telemetry.gpus) ? telemetry.gpus : [],
       allocatedGpus: 0,
       storageNvmeTb: Number((Number(telemetry.storage?.totalBytes || 0) / 1024 ** 4).toFixed(2)),
-      temperatureC: 0,
+      temperatureC: null,
       uptimeDays: Number((Number(telemetry.uptimeSeconds || 0) / 86400).toFixed(1)),
       capabilities: row.capabilities || {},
       lastSeenAt: row.last_seen_at,
@@ -556,7 +569,7 @@ async function getNovaClusterSummary() {
     activeVlansCount: networks.rows.length,
     vlanRange: 'Nova managed',
     sdnController: 'Nova Networking',
-    crossTenantIsolation: networks.rows.length ? 'Nova bridge isolation enabled' : 'Not configured',
+    crossTenantIsolation: networks.rows.length ? 'Not verified' : 'Not configured',
     nodes: normalizedHosts,
     computeReady: onlineNodes > 0,
   };
@@ -601,7 +614,9 @@ app.post('/api/clients', requireAuth, async (req, res) => {
   const vCpu = Number(req.body?.vCpu || 2);
   const ramGb = Number(req.body?.ramGb || 4);
   const storageGb = Number(req.body?.storageGb || 32);
-  const bandwidthLimitMbps = Number(req.body?.bandwidthLimitMbps || 1000);
+  const imageId = String(req.body?.imageId || '').trim();
+  if (!imageId) return res.status(400).json({ error: 'Select a boot image for this client workload' });
+  const bandwidthLimitMbps = Number(req.body?.bandwidthLimitMbps || 0);
   if (!company || !email || !name) return res.status(400).json({ error: 'Company, contact email, and instance name are required' });
   if (!novaAgentConfigured()) return res.status(503).json({ error: 'Nova compute host is not connected. Install and connect Nova Agent before deploying client instances.' });
 
@@ -631,6 +646,7 @@ app.post('/api/clients', requireAuth, async (req, res) => {
       memoryMb: Math.round(ramGb * 1024),
       diskGb: storageGb,
       bridge: network.bridge,
+      imageId, bootMode: 'image',
       start: true,
     });
 
@@ -639,30 +655,30 @@ app.post('/api/clients', requireAuth, async (req, res) => {
       clientCompany: company,
       clientEmail: email,
       status: vm.status === 'Running' ? 'Active' : 'Provisioning',
-      plan: String(req.body?.plan || 'Starter'),
-      monthlyBilling: 0,
+      plan: null,
+      monthlyBilling: null,
       clusterNodeId: String(host.hostname || host.id || 'nova-host'),
-      vlanId: 0,
-      vxlanVni: 0,
+      vlanId: null,
+      vxlanVni: null,
       vpcCidr: network.cidr,
       isolatedSubnet: network.cidr,
       virtualGateway: network.gateway,
       natGatewayIp: 'Host NAT',
       dnsServers: [],
-      firewallRulesCount: 0,
-      isolationStatus: 'Nova bridge isolated',
+      firewallRulesCount: null,
+      isolationStatus: 'Not verified',
       vCpuAllocated: vCpu,
-      vCpuMaxQuota: vCpu,
+      vCpuMaxQuota: null,
       ramGbAllocated: ramGb,
-      ramGbMaxQuota: ramGb,
+      ramGbMaxQuota: null,
       gpuAllocated: String(req.body?.gpu || 'None'),
       storageGbAllocated: storageGb,
       bandwidthLimitMbps,
-      cpuUsagePct: 0,
-      ramUsagePct: 0,
-      storageUsedGb: 0,
+      cpuUsagePct: null,
+      ramUsagePct: null,
+      storageUsedGb: null,
       activeWorkloadsCount: vm.status === 'Running' ? 1 : 0,
-      networkThroughputMbps: 0,
+      networkThroughputMbps: null,
       installedApps: [],
       networkId: network.id,
       vmId: vm.id,
@@ -745,14 +761,6 @@ app.delete('/api/clients/:id', requireAuth, async (req, res) => {
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Client deprovision failed' });
   }
-});
-
-app.get('/api/marketplace/catalog', requireAuth, async (_req, res) => {
-  res.json({ total: 0, apps: [], gpuOptions: [] });
-});
-
-app.post('/api/marketplace/install', requireAuth, async (_req, res) => {
-  res.status(409).json({ error: 'Nova application marketplace installation is not enabled yet.' });
 });
 
 app.get('/api/nova/host', requireAuth, async (_req, res) => {
@@ -923,7 +931,18 @@ app.post('/api/compute/vms', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/compute/vms/:id/console', requireAuth, async (req, res) => {
+app.patch('/api/compute/vms/:id', requireAuth, async (req, res) => {
+  const result = await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.id)}`, 'PATCH', req.body);
+  await syncNovaAgentInventory().catch(console.error); res.json(result);
+});
+app.get('/api/compute/vms', requireAuth, async (_req, res) => res.json(await novaAgentRequest('/v1/instances')));
+app.post('/api/compute/vms/:id/volumes', requireAuth, async (req, res) => res.json(await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.id)}/volumes`, 'POST', { volumeId: req.body?.volumeId })));
+app.delete('/api/compute/vms/:id/volumes/:volumeId', requireAuth, async (req, res) => res.json(await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.id)}/volumes/${encodeURIComponent(req.params.volumeId)}`, 'DELETE')));
+app.delete('/api/applications/:id', requireAdmin, async (req, res) => {
+  await novaAgentRequest(`/v1/apps/${encodeURIComponent(req.params.id)}`, 'DELETE'); await syncNovaAgentInventory().catch(console.error); res.status(204).end();
+});
+
+app.get('/api/compute/vms/:id/console', requireControl, async (req, res) => {
   try {
     const consoleInfo = await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.id)}/console`);
     if (!consoleInfo?.running) return res.status(409).json({ error: 'Start the VM before opening its graphical console' });
@@ -1001,6 +1020,15 @@ app.post('/api/compute/images/import-url', requireAuth, async (req, res) => {
   }
 });
 
+app.delete('/api/compute/images/:imageId',requireAuth,async (req,res) => {
+  await novaAgentRequest(`/v1/images/${encodeURIComponent(req.params.imageId)}`,'DELETE');
+  await pool.query("DELETE FROM resources WHERE type='image' AND provider='nova-native' AND external_id=$1",[req.params.imageId]);
+  res.status(204).end();
+});
+app.delete('/api/compute/snapshots/:vmId/:name',requireAuth,async (req,res) => {
+  await novaAgentRequest(`/v1/instances/${encodeURIComponent(req.params.vmId)}/snapshots/${encodeURIComponent(req.params.name)}`,'DELETE'); res.status(204).end();
+});
+
 app.get('/api/compute/snapshots', requireAuth, async (_req, res) => {
   try {
     const instances = await novaAgentRequest('/v1/instances');
@@ -1009,7 +1037,7 @@ app.get('/api/compute/snapshots', requireAuth, async (_req, res) => {
       try {
         const snapshots = await novaAgentRequest(`/v1/instances/${encodeURIComponent(vm.id)}/snapshots`);
         all.push(...(Array.isArray(snapshots) ? snapshots : []));
-      } catch {}
+      } catch (error: any) { throw new Error(`Unable to read snapshots for ${vm.name}: ${error.message}`); }
     }
     res.json(all);
   } catch (error) {
@@ -1080,187 +1108,15 @@ app.post('/api/compute/vms/:id/action', requireAuth, async (req, res) => {
   }
 });
 
-function safeDatabaseName(value: string) {
-  const cleaned = value.trim();
-  if (!/^[A-Za-z][A-Za-z0-9_-]{0,47}$/.test(cleaned)) throw new Error('Database name must start with a letter and contain only letters, numbers, underscores, or hyphens');
-  return cleaned;
-}
-
-function quoteIdentifier(value: string) {
-  return '"' + value.replace(/"/g, '""') + '"';
-}
-
-function databaseSchemaFor(id: string) {
-  return `nova_db_${id.replace(/-/g, '').slice(0, 24)}`;
-}
-
-function databaseRecord(row: any) {
-  return {
-    id: row.id,
-    ...row.data,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-app.get('/api/databases', requireAuth, async (_req, res) => {
-  const result = await pool.query(
-    `SELECT id, data, created_at, updated_at
-       FROM resources WHERE type = 'database' AND provider = 'nova-native'
-       ORDER BY created_at DESC`,
-  );
-  res.json(result.rows.map(databaseRecord));
-});
-
-app.post('/api/databases', requireAuth, async (req, res) => {
-  try {
-    const name = safeDatabaseName(String(req.body?.name || ''));
-    const engine = String(req.body?.engine || 'PostgreSQL 16');
-    if (!engine.startsWith('PostgreSQL')) return res.status(400).json({ error: 'This Nova build currently supports PostgreSQL databases.' });
-    const id = crypto.randomUUID();
-    const schema = databaseSchemaFor(id);
-    await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
-    const serverVersion = await pool.query('SHOW server_version');
-    const data = {
-      id,
-      name,
-      engine: 'PostgreSQL',
-      version: String(serverVersion.rows[0]?.server_version || 'PostgreSQL'),
-      status: 'Running',
-      cpuUsagePct: 0,
-      storageUsedGb: 0,
-      storageTotalGb: 20,
-      connections: 0,
-      maxConnections: 100,
-      replication: 'Single Node',
-      backups: 'Manual snapshots',
-      endpoint: '127.0.0.1',
-      port: 5432,
-      environment: 'Production',
-      region: 'local',
-      schema,
-    };
-    const saved = await pool.query(
-      `INSERT INTO resources (id, type, provider, external_id, data)
-       VALUES ($1, 'database', 'nova-native', $2, $3)
-       RETURNING id, data, created_at, updated_at`,
-      [id, `database:${id}`, data],
-    );
-    await pool.query(
-      `INSERT INTO activity_events (actor, action, resource, status)
-       VALUES ($1, 'database.create', $2, 'SUCCESS')`,
-      [String(req.session.userId || 'user'), id],
-    );
-    res.status(201).json(databaseRecord(saved.rows[0]));
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : 'Database creation failed' });
-  }
-});
-
-app.post('/api/databases/:id/query', requireAuth, async (req, res) => {
-  const db = await pool.query(
-    `SELECT id, data FROM resources WHERE id = $1 AND type = 'database' AND provider = 'nova-native' LIMIT 1`,
-    [req.params.id],
-  );
-  if (!db.rows[0]) return res.status(404).json({ error: 'Nova database not found' });
-  const sql = String(req.body?.sql || '').trim();
-  if (!sql) return res.status(400).json({ error: 'SQL query is required' });
-  if (sql.length > 100000) return res.status(400).json({ error: 'SQL query is too large' });
-
-  const schema = String(db.rows[0].data?.schema || '');
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL search_path TO ${quoteIdentifier(schema)}, public`);
-    await client.query(`SET LOCAL statement_timeout = '15s'`);
-    const result = await client.query(sql);
-    await client.query('COMMIT');
-    res.json({
-      command: result.command,
-      rowCount: result.rowCount,
-      fields: result.fields?.map((field: any) => field.name) || [],
-      rows: Array.isArray(result.rows) ? result.rows.slice(0, 1000) : [],
-    });
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    res.status(400).json({ error: error instanceof Error ? error.message : 'SQL execution failed' });
-  } finally {
-    client.release();
-  }
-});
-
-app.get('/api/databases/:id/snapshots', requireAuth, async (req, res) => {
-  const result = await pool.query(
-    `SELECT id, data, created_at FROM resources
-       WHERE type = 'database-snapshot' AND provider = 'nova-native'
-         AND data->>'databaseId' = $1
-       ORDER BY created_at DESC`,
-    [req.params.id],
-  );
-  res.json(result.rows.map((row: any) => ({ id: row.id, ...row.data, createdAt: row.created_at })));
-});
-
-app.post('/api/databases/:id/snapshots', requireAuth, async (req, res) => {
-  const db = await pool.query(
-    `SELECT id, data FROM resources WHERE id = $1 AND type = 'database' AND provider = 'nova-native' LIMIT 1`,
-    [req.params.id],
-  );
-  if (!db.rows[0]) return res.status(404).json({ error: 'Nova database not found' });
-  const schema = String(db.rows[0].data?.schema || '');
-  const snapshotName = String(req.body?.name || `${db.rows[0].data?.name}-${Date.now()}`).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 80);
-  const backupDir = path.join(process.cwd(), 'data', 'database-snapshots');
-  fs.mkdirSync(backupDir, { recursive: true });
-  const filename = `${req.params.id}-${Date.now()}.sql`;
-  const filePath = path.join(backupDir, filename);
-  try {
-    const dbUrl = new URL(String(process.env.DATABASE_URL));
-    const args = [
-      '--host', dbUrl.hostname,
-      '--port', dbUrl.port || '5432',
-      '--username', decodeURIComponent(dbUrl.username),
-      '--dbname', decodeURIComponent(dbUrl.pathname.replace(/^\//, '')),
-      '--schema', schema,
-      '--no-owner',
-      '--no-privileges',
-      '--file', filePath,
-    ];
-    const dump = spawnSync('pg_dump', args, {
-      encoding: 'utf8',
-      timeout: 120000,
-      env: { ...process.env, PGPASSWORD: decodeURIComponent(dbUrl.password || '') },
-    });
-    if (dump.error) throw dump.error;
-    if (dump.status !== 0) throw new Error((dump.stderr || dump.stdout || 'pg_dump failed').trim());
-    const stat = fs.statSync(filePath);
-    const data = {
-      databaseId: req.params.id,
-      databaseName: db.rows[0].data?.name,
-      name: snapshotName,
-      filePath,
-      sizeBytes: stat.size,
-      status: 'Available',
-    };
-    const saved = await pool.query(
-      `INSERT INTO resources (type, provider, external_id, data)
-       VALUES ('database-snapshot', 'nova-native', $1, $2)
-       RETURNING id, data, created_at`,
-      [`database-snapshot:${req.params.id}:${Date.now()}`, data],
-    );
-    res.status(201).json({ id: saved.rows[0].id, ...saved.rows[0].data, createdAt: saved.rows[0].created_at });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Database snapshot failed' });
-  }
-});
-
 app.get('/api/applications', requireAuth, async (_req, res) => {
   try {
-    res.json(await novaAgentRequest('/v1/apps'));
+    res.json(redact(await novaAgentRequest('/v1/apps')));
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Unable to load Nova applications' });
   }
 });
 
-app.post('/api/applications', requireAuth, async (req, res) => {
+app.post('/api/applications', requireAdmin, async (req, res) => {
   const payload = {
     name: String(req.body?.name || '').trim(),
     sourceType: String(req.body?.sourceType || 'git'),
@@ -1285,7 +1141,7 @@ app.post('/api/applications', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/applications/:id/redeploy', requireAuth, async (req, res) => {
+app.post('/api/applications/:id/redeploy', requireAdmin, async (req, res) => {
   const id = String(req.params.id || '');
   const jobId = await createJob('application.redeploy', req.session.userId, 'application', id, {});
   try {
@@ -1300,7 +1156,7 @@ app.post('/api/applications/:id/redeploy', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/applications/:id/action', requireAuth, async (req, res) => {
+app.post('/api/applications/:id/action', requireAdmin, async (req, res) => {
   try {
     const appState = await novaAgentRequest(
       `/v1/apps/${encodeURIComponent(req.params.id)}/action`,
@@ -1379,6 +1235,7 @@ app.get('/api/storage/volumes', requireAuth, async (_req, res) => {
 });
 
 app.post('/api/storage/volumes', requireAuth, async (req, res) => {
+  if (['device','devices','path','pool','format'].some(key => Object.hasOwn(req.body || {},key))) return res.status(400).json({ error:'Raw-device provisioning is disabled. Use Nova-managed qcow2 volumes.' });
   const name = String(req.body?.name || '').trim();
   const sizeGb = Number(req.body?.sizeGb || 20);
   const jobId = await createJob('storage.volume.create', req.session.userId, 'storage', null, { name, sizeGb });
@@ -1452,7 +1309,7 @@ app.post('/api/compute/ssh-keys', requireAuth, async (req, res) => {
     name,
     publicKey,
     fingerprint,
-    type: publicKey.startsWith('ssh-rsa') ? 'RSA-4096' : 'ED25519',
+    type: publicKey.startsWith('ssh-rsa') ? 'RSA' : 'ED25519',
     created: new Date().toISOString(),
     lastUsed: 'Never',
   };
@@ -1479,7 +1336,9 @@ app.get('/api/system/summary', requireAuth, async (_req, res) => {
 
   const totalMemoryBytes = os.totalmem();
   const freeMemoryBytes = os.freemem();
-  const network = Object.entries(os.networkInterfaces())
+  let networkInterfaces: ReturnType<typeof os.networkInterfaces> = {};
+  try { networkInterfaces = os.networkInterfaces(); } catch {}
+  const network = Object.entries(networkInterfaces)
     .flatMap(([name, addresses]) =>
       (addresses || [])
         .filter((address) => address.family === 'IPv4' && !address.internal)
@@ -1546,60 +1405,6 @@ app.get('/api/activity', requireAuth, async (_req, res) => {
   res.json(result.rows);
 });
 
-app.get('/api/iam/users', requireAuth, async (_req, res) => {
-  const result = await pool.query(
-    `SELECT id, email, display_name AS "displayName", role, active,
-            created_at AS "createdAt", last_login_at AS "lastLoginAt"
-       FROM users ORDER BY created_at ASC`
-  );
-  res.json(result.rows);
-});
-
-app.post('/api/iam/users', requireAdmin, async (req, res) => {
-  const email = String(req.body?.email || '').trim().toLowerCase();
-  const displayName = String(req.body?.displayName || '').trim();
-  const requestedRole = String(req.body?.role || 'operator');
-  const role = ['admin', 'operator', 'viewer'].includes(requestedRole) ? requestedRole : 'operator';
-  if (!displayName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'A valid display name and email are required' });
-  }
-  const tempPassword = crypto.randomBytes(18).toString('base64url');
-  const passwordHash = await bcrypt.hash(tempPassword, 12);
-  try {
-    const result = await pool.query(
-      `INSERT INTO users (email, display_name, password_hash, role, active)
-       VALUES ($1, $2, $3, $4, TRUE)
-       RETURNING id, email, display_name AS "displayName", role, active,
-                 created_at AS "createdAt", last_login_at AS "lastLoginAt"`,
-      [email, displayName, passwordHash, role],
-    );
-    await pool.query(
-      `INSERT INTO activity_events (actor, action, resource, status)
-       VALUES ($1, 'iam.user.create', $2, 'SUCCESS')`,
-      [String(req.session.userId || 'user'), result.rows[0].id],
-    );
-    res.status(201).json({ ...result.rows[0], temporaryPassword: tempPassword });
-  } catch (error: any) {
-    if (error?.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unable to create user' });
-  }
-});
-
-app.patch('/api/iam/users/:id', requireAdmin, async (req, res) => {
-  const role = req.body?.role ? String(req.body.role) : undefined;
-  const active = typeof req.body?.active === 'boolean' ? req.body.active : undefined;
-  if (role && !['admin', 'operator', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
-  const current = await pool.query('SELECT id, role, active FROM users WHERE id = $1', [req.params.id]);
-  if (!current.rows[0]) return res.status(404).json({ error: 'User not found' });
-  const result = await pool.query(
-    `UPDATE users SET role = $2, active = $3 WHERE id = $1
-     RETURNING id, email, display_name AS "displayName", role, active,
-               created_at AS "createdAt", last_login_at AS "lastLoginAt"`,
-    [req.params.id, role || current.rows[0].role, active ?? current.rows[0].active],
-  );
-  res.json(result.rows[0]);
-});
-
 app.post('/api/security/remediate/:id', requireAdmin, async (req, res) => {
   const finding = await pool.query(
     `SELECT id, data FROM resources WHERE id = $1 AND type = 'security_alert' LIMIT 1`,
@@ -1617,18 +1422,7 @@ app.get('/api/resources', requireAuth, async (req, res) => {
   res.json(result.rows);
 });
 
-app.post('/api/resources', requireAuth, async (req, res) => {
-  const type = String(req.body?.type || '');
-  const data = req.body?.data;
-  if (!type || !data || typeof data !== 'object') {
-    return res.status(400).json({ error: 'type and data are required' });
-  }
-  const result = await pool.query(
-    'INSERT INTO resources (type, data) VALUES ($1, $2) RETURNING id, type, data, created_at, updated_at',
-    [type, data],
-  );
-  res.status(201).json(result.rows[0]);
-});
+app.post('/api/resources', requireAdmin, (_req, res) => res.status(405).json({ error: 'Use the resource-specific provisioning API; inventory records cannot provision infrastructure' }));
 
 let aiClient: GoogleGenAI | null = null;
 app.post('/api/ai/query', requireAuth, async (req, res) => {
@@ -1641,7 +1435,7 @@ app.post('/api/ai/query', requireAuth, async (req, res) => {
   try {
     const response = await aiClient.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: `You are Nova AI, a cloud infrastructure assistant. Give precise, safe, actionable guidance. User request: ${prompt}`,
+      contents: `You are Nova AI, a cloud infrastructure assistant. Give precise, safe, actionable guidance. You have no live infrastructure context and cannot execute actions. Do not claim to have inspected telemetry or applied changes. User request: ${prompt}`,
     });
     res.json({ source: 'gemini', response: response.text || 'No response returned', timestamp: new Date().toISOString() });
   } catch (error) {
@@ -1653,7 +1447,7 @@ app.post('/api/ai/query', requireAuth, async (req, res) => {
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown Nova API endpoint' }));
 app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Nova API request failed', error);
-  if (!res.headersSent) res.status(error.status || 500).json({ error: error.status === 400 ? 'Invalid request body' : 'Nova request failed' });
+  if (!res.headersSent) res.status(error.status || 500).json({ error: error.status ? error.message : 'Nova request failed' });
 });
 
 async function startServer() {

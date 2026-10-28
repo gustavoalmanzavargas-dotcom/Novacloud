@@ -8,7 +8,7 @@ if [[ "$PWD" != /opt/novacloud || ! -f .env ]]; then
 fi
 # Check out the reviewed release before invoking this script. Do not overwrite
 # local source changes or replace controller credentials during an update.
-npm ci
+npm ci --include=dev
 npm run lint
 npm run build
 npm run db:migrate
@@ -28,6 +28,13 @@ if [[ -f "${NGINX_FILE}" ]]; then
   rm -f "${NGINX_BACKUP}"
   systemctl reload nginx
 fi
+# Existing installations also need journal access after this release.
+mkdir -p /etc/systemd/system/novacloud.service.d
+cat >/etc/systemd/system/novacloud.service.d/journal.conf <<'UNIT'
+[Service]
+SupplementaryGroups=systemd-journal
+UNIT
+systemctl daemon-reload
 systemctl restart novacloud
 for _ in {1..30}; do
   if curl -fsS http://127.0.0.1:3000/api/health; then echo; exit 0; fi

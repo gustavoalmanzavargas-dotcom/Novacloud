@@ -54,7 +54,7 @@ if [[ "${SOURCE_DIR}" != "${APP_DIR}" ]]; then
 fi
 
 cd "${APP_DIR}"
-npm install
+npm ci --include=dev
 npm run build
 
 # The agent owns bridge, DHCP and NAT setup and restores them at each start.
@@ -75,6 +75,7 @@ chmod 600 /etc/novacloud-agent.env
 cat >/etc/systemd/system/nova-agent.service <<EOF
 [Unit]
 Description=Cyverax Nova Compute Agent
+PartOf=novacloud.service
 After=network-online.target
 Wants=network-online.target
 

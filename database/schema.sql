@@ -72,3 +72,5 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status);
 CREATE INDEX IF NOT EXISTS jobs_resource_idx ON jobs(resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS console_settings (id TEXT PRIMARY KEY, data JSONB NOT NULL DEFAULT '{}'::jsonb);

@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
+import { SessionContext } from '../ConsoleViews';
 import { Boxes, Plus, Play, Square, RotateCw, Terminal, Trash2, X, Server } from 'lucide-react';
 
 interface ContainerRecord {
@@ -19,6 +20,8 @@ interface ContainersViewProps {
 
 export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dark' }) => {
   const isLight = themeMode === 'light';
+  const { user } = useContext(SessionContext);
+  const canWrite = user?.role === 'admin' || user?.role === 'operator';
   const [containers, setContainers] = useState<ContainerRecord[]>([]);
   const [options, setOptions] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -184,7 +187,7 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
         </div>
         <button
           onClick={() => setShowCreate(true)}
-          disabled={loading || !options?.available}
+          disabled={!canWrite || loading || !options?.available}
           className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <Plus className="w-4 h-4" /> Create Container
@@ -228,17 +231,17 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
                 <td className="px-3 py-3 font-mono">{container.networkMode}</td>
                 <td className="px-4 py-3">
                   <div className="flex items-center justify-end gap-1">
-                    <button onClick={() => action(container, container.status === 'Running' ? 'stop' : 'start')} className="p-1.5 rounded hover:bg-slate-800" title={container.status === 'Running' ? 'Stop' : 'Start'}>
+                    <button disabled={!canWrite || working} onClick={() => action(container, container.status === 'Running' ? 'stop' : 'start')} className="p-1.5 rounded hover:bg-slate-800" title={container.status === 'Running' ? 'Stop' : 'Start'}>
                       {container.status === 'Running' ? <Square className="w-3.5 h-3.5 text-amber-400" /> : <Play className="w-3.5 h-3.5 text-emerald-400" />}
                     </button>
-                    <button onClick={() => action(container, 'restart')} disabled={container.status !== 'Running'} className="p-1.5 rounded hover:bg-slate-800 disabled:opacity-30" title="Restart">
+                    <button onClick={() => action(container, 'restart')} disabled={!canWrite || working || container.status !== 'Running'} className="p-1.5 rounded hover:bg-slate-800 disabled:opacity-30" title="Restart">
                       <RotateCw className="w-3.5 h-3.5 text-cyan-400" />
                     </button>
-                    <button onClick={() => openTerminal(container)} disabled={container.status !== 'Running'} className="px-2 py-1 rounded bg-slate-800 text-cyan-300 disabled:opacity-30">
+                    <button onClick={() => openTerminal(container)} disabled={!canWrite || working || container.status !== 'Running'} className="px-2 py-1 rounded bg-slate-800 text-cyan-300 disabled:opacity-30">
                       <span className="flex items-center gap-1"><Terminal className="w-3.5 h-3.5" /> Terminal</span>
                     </button>
                     <button
-                      onClick={() => remove(container)}
+                      disabled={!canWrite || working} onClick={() => remove(container)}
                       className={`px-2 py-1 rounded text-[11px] font-semibold flex items-center gap-1 ${isLight ? 'text-red-700 hover:bg-red-50 border border-red-200' : 'text-red-400 hover:bg-red-500/10 border border-red-500/20'}`}
                       title="Delete container and root filesystem"
                     >
@@ -296,8 +299,8 @@ export const ContainersView: React.FC<ContainersViewProps> = ({ themeMode = 'dar
                 Network: Nova bridge with DHCP and outbound NAT. Console: terminal. Initial Debian rootfs creation can take a few minutes.
               </div>
               <div className={`flex justify-end gap-2 pt-2 border-t ${isLight ? 'border-slate-200' : 'border-slate-800'}`}>
-                <button type="button" onClick={() => setShowCreate(false)} disabled={working} className={`px-3 py-2 border rounded-lg ${isLight ? 'border-slate-300 text-slate-700 hover:bg-slate-50' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}`}>Cancel</button>
-                <button type="submit" disabled={working} className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold rounded-lg disabled:opacity-50">
+                <button type="button" onClick={() => setShowCreate(false)} disabled={!canWrite || working} className={`px-3 py-2 border rounded-lg ${isLight ? 'border-slate-300 text-slate-700 hover:bg-slate-50' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}`}>Cancel</button>
+                <button type="submit" disabled={!canWrite || working} className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold rounded-lg disabled:opacity-50">
                   {working ? 'Creating root filesystem…' : 'Create & Start Container'}
                 </button>
               </div>

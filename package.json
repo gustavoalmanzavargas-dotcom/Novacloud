@@ -13,34 +13,37 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "agent:start": "node dist/nova-agent.cjs",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:browser": "node --import tsx test/browser.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
-    "lucide-react": "^0.546.0",
-    "react": "^19.0.1",
-    "react-dom": "^19.0.1",
-    "vite": "^6.2.3",
-    "express": "^4.21.2",
-    "dotenv": "^17.2.3",
     "bcryptjs": "^3.0.2",
     "connect-pg-simple": "^10.0.0",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
     "express-session": "^1.18.2",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
     "pg": "^8.16.3",
-    "motion": "^12.23.24"
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.13",
+    "@types/express": "^4.17.21",
+    "@types/express-session": "^1.18.2",
     "@types/node": "^22.14.0",
+    "@types/pg": "^8.15.5",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "playwright": "^1.62.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3",
-    "@types/express": "^4.17.21",
-    "@types/express-session": "^1.18.2",
-    "@types/pg": "^8.15.5"
+    "vite": "^6.2.3"
   }
 }

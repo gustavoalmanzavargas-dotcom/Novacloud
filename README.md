@@ -182,3 +182,42 @@ A missing `virsh` binary is not a fault: Nova invokes QEMU directly and does not
 require libvirt. The controller can remain in LXC while a separate authenticated
 Nova Agent runs on a KVM host. Without usable KVM, the connected QEMU host offers
 software emulation only; running services do not prove accelerated guest execution.
+
+## Functional cloud console
+
+The console uses a single capability-aware navigation model. Each executable
+control calls a real Nova handler; unsupported engines are identified before
+an operation can be submitted. See [the capability map](docs/CONSOLE-CAPABILITIES.md)
+for all 19 workspaces, implemented actions and deployment requirements.
+
+Users & access supports account creation, editing, role changes, disabling,
+password reset and deletion. Disabling or deleting an account revokes subsequent
+API requests from its existing sessions. At least one active administrator must
+remain. Viewers are read-only, including for interactive VM consoles.
+
+Databases supports create, rename, administrator SQL, confirmed deletion,
+snapshot download and transaction-protected restore. These resources are named
+PostgreSQL schemas in the existing PostgreSQL service; they are not standalone
+managed PostgreSQL clusters. Database backups remain accessible after source
+deletion, and can recreate their absent source with explicit confirmation.
+
+Billing stores operator-entered invoice records; no payments or metered charges
+are fabricated. Marketplace is a private catalog of your administrators' Git
+application recipes. Nova AI starts empty and sends actual requests only when
+its model key is configured. It provides advice rather than executing changes.
+
+After installing this update, restarting `novacloud` also restarts the installed
+local compute agent through a systemd dependency. Apply the updater at least
+once so existing installations receive that unit configuration.
+
+For browser verification after a build:
+
+```bash
+npx playwright install chromium
+npm run test:browser
+```
+
+The browser suite uses an isolated test database and explicit infrastructure
+fixtures. Set `TEST_DATABASE_URL` to an isolated PostgreSQL test instance to run
+the native SQL dump/restore checks; CI uses PostgreSQL 16 and matching client
+utilities. Do not point test runs at a production control-plane database.

@@ -143,3 +143,34 @@ test('console proxy authenticates upstream and forwards upgraded traffic both wa
     upstream.close(); gateway.close();
   }
 });
+
+test('native qcow2 volumes attach, resize, snapshot, rollback and delete through the real agent', { skip: (await import('node:child_process')).spawnSync('qemu-img',['--version'],{ stdio:'ignore' }).status !== 0, timeout:30000 }, async () => {
+  const { execFileSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(),'nova-compute-test-')), port = await freePort();
+  const child = await start('dist/nova-agent.cjs',{ NOVA_AGENT_PORT:String(port),NOVA_AGENT_TOKEN:'test-secret',NOVA_AGENT_BRIDGE:'user',NOVA_AGENT_STATE_DIR:path.join(dir,'state'),NOVA_AGENT_RUN_DIR:path.join(dir,'run') },'Nova Agent listening');
+  const headers = { Authorization:'Bearer test-secret','Content-Type':'application/json' };
+  const call = async (url: string,method = 'GET',body?: any) => {
+    const response = await fetch(`http://127.0.0.1:${port}${url}`,{ method,headers,body:body === undefined ? undefined : JSON.stringify(body) });
+    const data = response.status === 204 ? null : await response.json();
+    assert.ok(response.ok,JSON.stringify(data)); return data;
+  };
+  try {
+    const vm = await call('/v1/instances','POST',{ name:'test-vm',vcpu:1,memoryMb:512,diskGb:4,bridge:'user',bootMode:'blank',start:false });
+    const volume = await call('/v1/volumes','POST',{ name:'test-data',sizeGb:1 });
+    assert.equal((await call(`/v1/instances/${vm.id}/volumes`,'POST',{ volumeId:volume.id })).attachedVolumes[0],volume.id);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/v1/volumes/${volume.id}`,{ method:'DELETE',headers })).status,409);
+    await call(`/v1/instances/${vm.id}/volumes/${volume.id}`,'DELETE');
+    await call(`/v1/volumes/${volume.id}`,'PATCH',{ sizeGb:2 });
+    const info = JSON.parse(execFileSync('qemu-img',['info','--output=json',volume.path],{ encoding:'utf8' }));
+    assert.equal(info['virtual-size'],2*1024**3);
+    await call(`/v1/instances/${vm.id}`,'PATCH',{ vcpu:2,memoryMb:1024,diskGb:5 });
+    await call(`/v1/instances/${vm.id}/snapshots`,'POST',{ name:'before-change' });
+    const snapshots = await call(`/v1/instances/${vm.id}/snapshots`);
+    assert.equal(snapshots[0].name,'before-change');
+    await call(`/v1/instances/${vm.id}/snapshots/before-change/rollback`,'POST');
+    await call(`/v1/volumes/${volume.id}`,'DELETE');
+    await call(`/v1/instances/${vm.id}`,'DELETE');
+    assert.deepEqual(await call('/v1/instances'),[]);
+    assert.deepEqual(await call('/v1/volumes'),[]);
+  } finally { await stop(child); fs.rmSync(dir,{ recursive:true,force:true }); }
+});

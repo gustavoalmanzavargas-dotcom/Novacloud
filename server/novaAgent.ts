@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { spawnSync } from 'child_process';
 import http from 'node:http';
 import { proxyWebSocket } from './websocketProxy';
+import { qmpCommand } from './qmp';
 import { STORAGE_POLICY, discoveryOnly, assertManagedDisk } from './storagePolicy';
 import { receiveImage, downloadImage } from './imageTransfer';
 import { execute, executeResult, containerDiagnostics, ipv4Network, lxcConfig } from './hostRuntime';
@@ -87,6 +88,7 @@ type InstanceState = {
   networkMode: 'bridge' | 'user';
   acceleration: 'kvm' | 'tcg';
   bootMode: 'image' | 'blank';
+  attachedVolumes?: string[];
   imageId?: string;
   vncDisplay: number;
   vncPort: number;
@@ -370,6 +372,13 @@ function startInstance(instance: InstanceState) {
     '-vnc', `127.0.0.1:${instance.vncDisplay}`,
   ];
 
+  for (const id of instance.attachedVolumes || []) {
+    const volume = readJson<NovaVolume>(jsonFile(volumesDir, id));
+    assertManagedDisk(disksDir, volume.path);
+    if (volume.attachedTo !== instance.id) throw new Error('Volume attachment state does not match this VM');
+    args.push('-drive', `file=${volume.path},if=virtio,format=qcow2,cache=none`);
+  }
+
   if (networkMode === 'bridge') {
     args.push(
       '-netdev', `tap,id=net0,ifname=${instance.tap},script=no,downscript=no`,
@@ -496,12 +505,25 @@ function storageMounts() {
   }
 }
 
+let bridgeProbe: { at: number; available: boolean } | null = null;
+function canCreateBridge() {
+  if (bridgeProbe && Date.now() - bridgeProbe.at < 30000) return bridgeProbe.available;
+  const bridge = `nvc${process.pid}`.slice(0, 15);
+  const probe = spawnSync('ip', ['link', 'add', bridge, 'type', 'bridge'], { stdio: 'ignore', timeout: 3000 });
+  const available = probe.status === 0;
+  if (available) spawnSync('ip', ['link', 'delete', bridge], { stdio: 'ignore', timeout: 3000 });
+  bridgeProbe = { at: Date.now(), available };
+  return available;
+}
 function hostFacts() {
   const cpus = os.cpus();
   const totalMemory = os.totalmem();
   const freeMemory = os.freemem();
   const stat = fs.statfsSync(stateDir);
-  const interfaces = Object.entries(os.networkInterfaces()).flatMap(([name, values]) =>
+  let addresses: ReturnType<typeof os.networkInterfaces> = {};
+  const telemetryErrors: string[] = [];
+  try { addresses = os.networkInterfaces(); } catch (error) { telemetryErrors.push(error instanceof Error ? error.message : 'Interface telemetry unavailable'); }
+  const interfaces = Object.entries(addresses).flatMap(([name, values]) =>
     (values || []).filter((entry) => entry.family === 'IPv4').map((entry) => ({
       name, address: entry.address, cidr: entry.cidr, internal: entry.internal,
     }))
@@ -540,6 +562,8 @@ function hostFacts() {
       userNetworking: commandExists('qemu-system-x86_64'),
       tapNetworking: canUseTapBridge(defaultBridge),
       nftables: commandExists('nft'),
+      bridgeCreation: canCreateBridge(),
+      applications: commandExists('git') && commandExists('npm') && commandExists('systemd-run'),
       iproute2: commandExists('ip'),
       bridge: defaultBridge,
       containers: runtimeDiagnostics().available,
@@ -548,6 +572,7 @@ function hostFacts() {
       networkError,
     },
     interfaces,
+    telemetryErrors,
     timestamp: new Date().toISOString(),
   };
 }
@@ -640,6 +665,54 @@ app.post('/v1/instances', (req, res) => {
   }
 });
 
+app.patch('/v1/instances/:id', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (pidFor(instance)) return res.status(409).json({ error: 'Stop the VM before editing CPU, memory or root disk' });
+    const vcpu = Number(req.body?.vcpu ?? instance.vcpu), memoryMb = Number(req.body?.memoryMb ?? instance.memoryMb), diskGb = Number(req.body?.diskGb ?? instance.diskGb);
+    if (!Number.isInteger(vcpu) || vcpu < 1 || vcpu > 256 || !Number.isInteger(memoryMb) || memoryMb < 512 || memoryMb > 1048576 || !Number.isInteger(diskGb) || diskGb < instance.diskGb || diskGb > 65536) return res.status(400).json({ error: 'Invalid resource limits; root disks can only grow' });
+    if (diskGb > instance.diskGb) run('qemu-img', ['resize', instance.diskPath, `${diskGb}G`]);
+    Object.assign(instance, { vcpu, memoryMb, diskGb }); saveInstance(instance); res.json(currentState(instance));
+  } catch (error: any) { res.status(400).json({ error: error.message }); }
+});
+app.post('/v1/instances/:id/volumes', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (pidFor(instance)) return res.status(409).json({ error: 'Stop the VM before attaching a volume' });
+    const volume = readJson<NovaVolume>(jsonFile(volumesDir, String(req.body?.volumeId || '')));
+    assertManagedDisk(disksDir, volume.path);
+    if (volume.attachedTo) return res.status(409).json({ error: 'Volume is already attached' });
+    instance.attachedVolumes = [...(instance.attachedVolumes || []), volume.id];
+    volume.attachedTo = instance.id; volume.status = 'In-Use';
+    saveJson(jsonFile(volumesDir, volume.id), volume); saveInstance(instance); res.json(currentState(instance));
+  } catch (error: any) { res.status(400).json({ error: error.message }); }
+});
+app.delete('/v1/instances/:id/volumes/:volumeId', (req, res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (pidFor(instance)) return res.status(409).json({ error: 'Stop the VM before detaching a volume' });
+    const volume = readJson<NovaVolume>(jsonFile(volumesDir, req.params.volumeId));
+    if (volume.attachedTo !== instance.id) return res.status(409).json({ error: 'Volume is not attached to this VM' });
+    instance.attachedVolumes = (instance.attachedVolumes || []).filter(id => id !== volume.id);
+    volume.attachedTo = null; volume.status = 'Available';
+    saveInstance(instance); saveJson(jsonFile(volumesDir, volume.id), volume); res.json(currentState(instance));
+  } catch (error: any) { res.status(400).json({ error: error.message }); }
+});
+app.get('/v1/logs', async (_req, res) => {
+  try { const output = await execute('journalctl', ['-u', 'nova-agent', '-n', '200', '--no-pager', '-o', 'short-iso']); res.json({ source: 'agent', logs: output.split('\n').filter(Boolean) }); }
+  catch (error: any) { res.status(500).json({ error: error.message }); }
+});
+app.delete('/v1/apps/:id', (req, res) => {
+  try {
+    const current = readJson<NovaApplication>(applicationFile(req.params.id));
+    run('systemctl', ['stop', current.unit]);
+    if (applicationStatus(current).status === 'Running') return res.status(409).json({ error: 'Application did not stop' });
+    const workDir = path.join(appSourcesDir, safeId(current.id));
+    if (path.resolve(current.workDir) !== path.resolve(workDir)) throw new Error('Application directory is outside Nova ownership');
+    fs.rmSync(workDir, { recursive: true, force: true }); fs.unlinkSync(applicationFile(current.id)); res.status(204).end();
+  } catch (error: any) { res.status(400).json({ error: error.message }); }
+});
+
 app.get('/v1/instances/:id/console', (req, res) => {
   try {
     const instance = readInstance(req.params.id);
@@ -658,15 +731,16 @@ app.get('/v1/instances/:id/console', (req, res) => {
   }
 });
 
-app.post('/v1/instances/:id/action', (req, res) => {
+app.post('/v1/instances/:id/action', async (req, res) => {
   try {
     const instance = readInstance(req.params.id);
     const action = String(req.body?.action || '');
     if (action === 'start') return res.json(startInstance(instance));
-    if (action === 'stop' || action === 'shutdown') return res.json(stopInstance(instance));
-    if (action === 'reboot') {
-      stopInstance(instance);
-      return res.json(startInstance(instance));
+    if (action === 'stop') return res.json(stopInstance(instance));
+    if (action === 'shutdown' || action === 'reboot') {
+      if (!pidFor(instance)) return res.status(409).json({ error: 'Start the VM before sending a power action' });
+      await qmpCommand(instance.qmpSocket, action === 'shutdown' ? 'system_powerdown' : 'system_reset');
+      return res.json({ ...currentState(instance), requestedAction: action });
     }
     return res.status(400).json({ error: 'Unsupported instance action' });
   } catch (error) {
@@ -680,6 +754,10 @@ app.delete('/v1/instances/:id', (req, res) => {
     stopInstance(instance);
     if (req.query.keepDisk !== 'true') {
       try { fs.unlinkSync(instance.diskPath); } catch {}
+    }
+    for (const id of instance.attachedVolumes || []) {
+      const volume = readJson<NovaVolume>(jsonFile(volumesDir, id));
+      volume.attachedTo = null; volume.status = 'Available'; saveJson(jsonFile(volumesDir, id), volume);
     }
     fs.unlinkSync(instanceFile(instance.id));
     writeNoVncTokens();
@@ -935,6 +1013,24 @@ app.post('/v1/images/upload', async (req, res) => {
   }
 });
 
+app.delete('/v1/images/:id',(req,res) => {
+  try {
+    const file = path.join(imagesDir,safeFilename(req.params.id));
+    if (listInstances().some(vm => vm.imagePath === file)) return res.status(409).json({ error:'Image is referenced by a VM; delete its dependent VMs first' });
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) return res.status(409).json({ error:'Image must be a regular Nova-owned file' });
+    fs.unlinkSync(file); res.status(204).end();
+  } catch (error: any) { res.status(error.code === 'ENOENT' ? 404 : 400).json({ error:error.message }); }
+});
+app.delete('/v1/instances/:id/snapshots/:name',(req,res) => {
+  try {
+    const instance = readInstance(req.params.id);
+    if (pidFor(instance)) return res.status(409).json({ error:'Stop the VM before deleting internal snapshots' });
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(req.params.name)) return res.status(400).json({ error:'Invalid snapshot name' });
+    run('qemu-img',['snapshot','-d',req.params.name,instance.diskPath]); res.status(204).end();
+  } catch (error: any) { res.status(400).json({ error:error.message }); }
+});
+
 app.post('/v1/images/import-url', async (req, res) => {
   try {
     const url = String(req.body?.url || '').trim();
@@ -952,14 +1048,14 @@ app.post('/v1/images/import-url', async (req, res) => {
 app.get('/v1/instances/:id/snapshots', (req, res) => {
   try {
     const instance = readInstance(req.params.id);
-    const output = run('qemu-img', ['snapshot', '-l', '--output=json', instance.diskPath]);
-    const snapshots = JSON.parse(output || '[]').map((item: any) => ({
+    const output = run('qemu-img', ['info', '--output=json', '--force-share', instance.diskPath]);
+    const snapshots = (JSON.parse(output || '{}').snapshots || []).map((item: any) => ({
       id: `${instance.id}:${item.name}`,
       name: item.name,
       sourceVm: instance.name,
       sizeGb: instance.diskGb,
       created: item['date-sec'] ? new Date(Number(item['date-sec']) * 1000).toISOString() : '—',
-      encryption: 'Host filesystem',
+      encryption: 'Not verified',
       status: 'Available',
     }));
     res.json(snapshots);
@@ -1088,8 +1184,9 @@ app.patch('/v1/volumes/:id', (req, res) => {
     const target = jsonFile(volumesDir, req.params.id);
     const volume = readJson<NovaVolume>(target);
     assertManagedDisk(disksDir, volume.path, true);
+    if (volume.attachedTo) return res.status(409).json({ error: 'Detach the volume before resizing it' });
     const sizeGb = Number(req.body?.sizeGb || volume.sizeGb);
-    if (!Number.isFinite(sizeGb) || sizeGb < volume.sizeGb) return res.status(400).json({ error: 'Volumes can only be expanded' });
+    if (!Number.isFinite(sizeGb) || sizeGb > 65536 || sizeGb < volume.sizeGb) return res.status(400).json({ error: 'Volumes can only be expanded' });
     if (sizeGb > volume.sizeGb) {
       run('qemu-img', ['resize', volume.path, `${sizeGb}G`]);
       volume.sizeGb = sizeGb;

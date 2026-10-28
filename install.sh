@@ -149,6 +149,7 @@ Wants=network-online.target
 Type=simple
 User=novacloud
 Group=novacloud
+SupplementaryGroups=systemd-journal
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
 Environment=NODE_ENV=production
