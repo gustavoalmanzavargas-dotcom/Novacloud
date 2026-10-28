@@ -46,6 +46,21 @@ test('agent API authenticates, validates resources and transfers real image byte
   try {
     assert.equal((await fetch(`${base}/v1/host`)).status, 401);
     assert.equal((await fetch(`${base}/v1/health`, { headers })).status, 200);
+    const deviceResponse = await fetch(`${base}/v1/storage/devices`, { headers });
+    const deviceText = await deviceResponse.text();
+    assert.equal(deviceResponse.status, 200, deviceText);
+    const discovered = JSON.parse(deviceText);
+    assert.equal(discovered.policy.rawDeviceProvisioning, false);
+    assert.equal(discovered.managedStorage.kind, 'directory');
+    const rawRequest = await fetch(`${base}/v1/volumes`, { method: 'POST', headers, body: JSON.stringify({ name: 'unsafe', sizeGb: 10, device: '/dev/sda' }) });
+    assert.equal(rawRequest.status, 400);
+    const volumeId = '00000000-0000-0000-0000-000000000000';
+    const foreignFile = path.join(dir, 'lightnas-data');
+    fs.writeFileSync(foreignFile, 'preserve');
+    fs.writeFileSync(path.join(dir, `state/volumes/${volumeId}.json`), JSON.stringify({ id: volumeId, path: foreignFile, sizeGb: 10 }));
+    assert.equal((await fetch(`${base}/v1/volumes/${volumeId}`, { method: 'DELETE', headers })).status, 500);
+    assert.equal(fs.readFileSync(foreignFile, 'utf8'), 'preserve');
+
     const invalid = await fetch(`${base}/v1/instances`, { method: 'POST', headers, body: JSON.stringify({ name: 'test', vcpu: 1, memoryMb: 'not-a-number', diskGb: 20 }) });
     assert.equal(invalid.status, 400);
     assert.deepEqual(fs.readdirSync(path.join(dir, 'state/instances')), []);

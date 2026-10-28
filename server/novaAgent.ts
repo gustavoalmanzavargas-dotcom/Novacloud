@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { spawnSync } from 'child_process';
 import http from 'node:http';
 import { proxyWebSocket } from './websocketProxy';
+import { STORAGE_POLICY, discoveryOnly, assertManagedDisk } from './storagePolicy';
 import { receiveImage, downloadImage } from './imageTransfer';
 import { execute, executeResult, containerDiagnostics, ipv4Network, lxcConfig } from './hostRuntime';
 
@@ -244,7 +245,9 @@ function instanceFile(id: string) {
 }
 
 function readInstance(id: string): InstanceState {
-  return JSON.parse(fs.readFileSync(instanceFile(id), 'utf8'));
+  const instance = JSON.parse(fs.readFileSync(instanceFile(id), 'utf8')) as InstanceState;
+  assertManagedDisk(disksDir, instance.diskPath, true);
+  return instance;
 }
 
 function saveInstance(instance: InstanceState) {
@@ -523,7 +526,9 @@ function hostFacts() {
       totalBytes: stat.blocks * stat.bsize,
       freeBytes: stat.bavail * stat.bsize,
       usedBytes: (stat.blocks - stat.bfree) * stat.bsize,
-      devices: discoverBlockDevices(),
+      devices: discoveryOnly(discoverBlockDevices()),
+      policy: STORAGE_POLICY,
+      managedDiskDirectory: disksDir,
       mounts: storageMounts(),
     },
     capabilities: {
@@ -551,16 +556,18 @@ app.get('/v1/health', (_req, res) => res.json({ status: 'ok', service: 'nova-age
 app.get('/v1/host', (_req, res) => res.json(hostFacts()));
 
 app.get('/v1/storage/devices', (_req, res) => {
-  const facts = hostFacts();
+  const stat = fs.statfsSync(stateDir);
   res.json({
-    statePath: facts.storage.path,
+    statePath: stateDir,
     stateFilesystem: {
-      totalBytes: facts.storage.totalBytes,
-      freeBytes: facts.storage.freeBytes,
-      usedBytes: facts.storage.usedBytes,
+      totalBytes: stat.blocks * stat.bsize,
+      freeBytes: stat.bavail * stat.bsize,
+      usedBytes: (stat.blocks - stat.bfree) * stat.bsize,
     },
-    devices: facts.storage.devices,
-    mounts: facts.storage.mounts,
+    policy: STORAGE_POLICY,
+    managedStorage: { kind: 'directory', path: disksDir, backend: 'qcow2-files' },
+    devices: discoveryOnly(discoverBlockDevices()),
+    mounts: storageMounts(),
   });
 });
 app.get('/v1/instances', (_req, res) => res.json(listInstances()));
@@ -586,7 +593,7 @@ app.post('/v1/instances', (req, res) => {
     }
 
     const id = crypto.randomUUID();
-    const diskPath = path.join(disksDir, `${id}.qcow2`);
+    const diskPath = assertManagedDisk(disksDir, path.join(disksDir, `${id}.qcow2`), true);
     const imagePath = imageId ? path.join(imagesDir, safeFilename(imageId)) : undefined;
     if (imagePath && !fs.existsSync(imagePath)) return res.status(400).json({ error: 'Selected image does not exist on this Nova host' });
     const vncDisplay = nextVncDisplay();
@@ -1053,13 +1060,16 @@ app.get('/v1/volumes', (_req, res) => {
 
 app.post('/v1/volumes', (req, res) => {
   try {
+    if (['device', 'devices', 'path', 'pool', 'format'].some(key => Object.hasOwn(req.body || {}, key))) {
+      return res.status(400).json({ error: 'Raw-device provisioning is disabled. Nova volumes use only managed qcow2 files.' });
+    }
     const name = String(req.body?.name || '').trim();
     const sizeGb = Number(req.body?.sizeGb || 20);
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(name)) return res.status(400).json({ error: 'A valid volume name is required' });
     if (!Number.isFinite(sizeGb) || sizeGb < 1 || sizeGb > 65536) return res.status(400).json({ error: 'Volume size must be between 1 and 65536 GiB' });
     if (listJson<NovaVolume>(volumesDir).some((item) => item.name === name)) return res.status(409).json({ error: 'A volume with that name already exists' });
     const id = crypto.randomUUID();
-    const volumePath = path.join(disksDir, `volume-${id}.qcow2`);
+    const volumePath = assertManagedDisk(disksDir, path.join(disksDir, `volume-${id}.qcow2`), true);
     run('qemu-img', ['create', '-f', 'qcow2', volumePath, `${sizeGb}G`]);
     const volume: NovaVolume = {
       id, name, sizeGb, path: volumePath, format: 'qcow2', status: 'Available', attachedTo: null,
@@ -1077,6 +1087,7 @@ app.patch('/v1/volumes/:id', (req, res) => {
   try {
     const target = jsonFile(volumesDir, req.params.id);
     const volume = readJson<NovaVolume>(target);
+    assertManagedDisk(disksDir, volume.path, true);
     const sizeGb = Number(req.body?.sizeGb || volume.sizeGb);
     if (!Number.isFinite(sizeGb) || sizeGb < volume.sizeGb) return res.status(400).json({ error: 'Volumes can only be expanded' });
     if (sizeGb > volume.sizeGb) {
@@ -1095,8 +1106,9 @@ app.delete('/v1/volumes/:id', (req, res) => {
   try {
     const target = jsonFile(volumesDir, req.params.id);
     const volume = readJson<NovaVolume>(target);
+    assertManagedDisk(disksDir, volume.path, true);
     if (volume.attachedTo) return res.status(409).json({ error: 'Detach the volume before deleting it' });
-    try { fs.unlinkSync(volume.path); } catch {}
+    try { fs.unlinkSync(volume.path); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
     fs.unlinkSync(target);
     res.status(204).end();
   } catch (error) {

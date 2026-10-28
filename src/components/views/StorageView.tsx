@@ -395,7 +395,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
               <div>
                 <h3 className={`text-sm font-bold ${isLight ? 'text-slate-900' : 'text-slate-100'}`}>Host Storage Discovery</h3>
                 <p className={`text-xs mt-1 ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
-                  These are the block devices and mounts actually visible to the connected Nova Agent. Nova does not invent physical capacity.
+                  Discovery only. These devices are not assigned to Nova; ownership is unknown. Nova cannot format them or create pools. Volumes use files in Nova’s configured disk directory.
                 </p>
               </div>
               <button
@@ -411,7 +411,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
             {stateFilesystem && (
               <div className={`grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 text-xs ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
                 <div className={`rounded-lg border p-3 ${isLight ? 'border-slate-200 bg-slate-50' : 'border-slate-800 bg-slate-950/50'}`}>
-                  <div className="text-[10px] uppercase text-slate-500">Nova State Filesystem</div>
+                  <div className="text-[10px] uppercase text-slate-500">Filesystem containing Nova state (may be shared)</div>
                   <div className="font-mono font-semibold mt-1">{(Number(stateFilesystem.totalBytes || 0) / 1024 ** 3).toFixed(1)} GiB total</div>
                 </div>
                 <div className={`rounded-lg border p-3 ${isLight ? 'border-slate-200 bg-slate-50' : 'border-slate-800 bg-slate-950/50'}`}>
@@ -456,7 +456,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
                       <td className="px-3 py-3 font-mono">{device.transport || '—'}</td>
                       <td className="px-4 py-3">
                         <span className={device.readOnly ? 'text-amber-500' : 'text-emerald-500'}>
-                          {device.readOnly ? 'Read only' : 'Visible'}
+                          Unassigned · discovery only
                         </span>
                       </td>
                     </tr>
@@ -469,7 +469,7 @@ export const StorageView: React.FC<StorageViewProps> = ({
                         <td className="px-3 py-2 font-mono">{child.filesystem || '—'}</td>
                         <td className="px-3 py-2 font-mono text-[11px]">{child.mountpoints?.join(', ') || '—'}</td>
                         <td className="px-3 py-2 font-mono">{child.transport || '—'}</td>
-                        <td className="px-4 py-2">{child.readOnly ? 'Read only' : 'Visible'}</td>
+                        <td className="px-4 py-2">Unassigned · discovery only</td>
                       </tr>
                     ))}
                   </React.Fragment>

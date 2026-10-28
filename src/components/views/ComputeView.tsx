@@ -1367,6 +1367,16 @@ export const ComputeView: React.FC<ComputeViewProps> = ({
                 </div>
               </div>
 
+              {computeOptions?.capabilities && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
+                  {computeOptions.capabilities.kvm
+                    ? 'KVM acceleration is available on the connected compute host.'
+                    : computeOptions.capabilities.qemu
+                      ? 'KVM acceleration is unavailable on this host. VMs use slower QEMU software emulation. Connect a separate KVM host through Nova Agent for accelerated compute.'
+                      : 'QEMU is unavailable on the connected compute host.'}
+                </div>
+              )}
+
               <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <Disc className="w-4 h-4 text-cyan-400" />

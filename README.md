@@ -165,3 +165,20 @@ For a compute host:
 systemctl status nova-agent --no-pager
 journalctl -u nova-agent -n 100 --no-pager
 ```
+
+## Storage ownership boundary
+
+Host-visible disks and partitions are discovery records only. Their ownership is
+unknown and they are not automatically assigned to Nova, including unmounted
+hardware visible from an LXC. Nova has no raw-disk formatting or pool-creation
+endpoint. It does not inspect a mount label and assume that a disk is unused.
+
+Nova volumes are qcow2 files in the configured agent disk directory. Creation
+rejects raw-device/path/pool requests; resize and delete reject external paths,
+symlinks and non-regular files. Shared filesystem capacity is not dedicated Nova
+capacity. Keep LightNAS datasets and devices outside Nova's assigned directory.
+
+A missing `virsh` binary is not a fault: Nova invokes QEMU directly and does not
+require libvirt. The controller can remain in LXC while a separate authenticated
+Nova Agent runs on a KVM host. Without usable KVM, the connected QEMU host offers
+software emulation only; running services do not prove accelerated guest execution.

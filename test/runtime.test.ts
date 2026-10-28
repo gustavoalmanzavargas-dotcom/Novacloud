@@ -82,3 +82,33 @@ test('image import follows relative redirects and bounds redirect loops', async 
     assert.deepEqual(fs.readdirSync(dir), ['disk.iso']);
   } finally { server.closeAllConnections(); server.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('detected disks and partitions remain unassigned, regardless of mount status', async () => {
+  const { discoveryOnly, STORAGE_POLICY } = await import('../server/storagePolicy.ts');
+  const devices = discoveryOnly([{ path: '/dev/sda', children: [{ path: '/dev/sda1', mountpoints: ['/lightnas'] }] }]);
+  assert.equal(devices[0].provisioningAllowed, false);
+  assert.equal(devices[0].ownership, 'unknown');
+  assert.equal(devices[0].children[0].assignment, 'unassigned');
+  assert.equal(STORAGE_POLICY.rawDeviceProvisioning, false);
+  assert.equal(STORAGE_POLICY.poolCreation, false);
+});
+
+test('Nova disk guards reject external files, raw devices and symlinks', async () => {
+  const { assertManagedDisk } = await import('../server/storagePolicy.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nova-storage-'));
+  const id = '00000000-0000-0000-0000-000000000000';
+  const disk = path.join(dir, `${id}.qcow2`);
+  try {
+    assert.equal(assertManagedDisk(dir, disk, true), disk);
+    assert.throws(() => assertManagedDisk(dir, '/dev/sda', true));
+    assert.throws(() => assertManagedDisk(dir, path.join(dir, '../outside.qcow2'), true));
+    fs.writeFileSync(disk, 'nova');
+    assert.equal(assertManagedDisk(dir, disk), disk);
+    fs.unlinkSync(disk);
+    fs.symlinkSync('/dev/null', disk);
+    assert.throws(() => assertManagedDisk(dir, disk), /symbolic link/);
+    fs.unlinkSync(disk);
+    fs.mkdirSync(disk);
+    assert.throws(() => assertManagedDisk(dir, disk), /regular file/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
